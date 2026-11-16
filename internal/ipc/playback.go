@@ -1008,34 +1008,46 @@ func stitchTSSegments(
 	}
 
 	ext := strings.ToLower(filepath.Ext(outputPath))
-	args := []string{
-		"-nostdin",
-		"-hide_banner",
-		"-loglevel", "error",
-		"-fflags", "+genpts",
-		"-f", "concat",
-		"-safe", "0",
-		"-i", "concat.txt",
-		"-map", "0:v:0",
-		"-map", "0:a:0?",
-		"-c", "copy",
-	}
-	if ext == ".mp4" {
-		if strings.ToUpper(avCfg.VideoCodec) == "H265" || avCfg.VideoCodec == "" {
-			args = append(args, "-tag:v", "hvc1")
+	buildArgs := func(includeAudio bool) []string {
+		args := []string{
+			"-nostdin",
+			"-hide_banner",
+			"-loglevel", "error",
+			"-fflags", "+genpts",
+			"-f", "concat",
+			"-safe", "0",
+			"-i", "concat.txt",
+			"-map", "0:v:0",
 		}
-		args = append(args, "-movflags", "+faststart", "-avoid_negative_ts", "make_zero")
-	} else {
-		args = append(args, "-avoid_negative_ts", "make_zero")
+		if includeAudio {
+			args = append(args, "-map", "0:a:0?")
+		}
+		args = append(args, "-c", "copy")
+		if ext == ".mp4" {
+			if strings.ToUpper(avCfg.VideoCodec) == "H265" || avCfg.VideoCodec == "" {
+				args = append(args, "-tag:v", "hvc1")
+			}
+			args = append(args, "-movflags", "+faststart", "-avoid_negative_ts", "make_zero")
+		} else {
+			args = append(args, "-avoid_negative_ts", "make_zero")
+		}
+		return append(args, "-y", outputPath)
 	}
-	args = append(args, "-y", outputPath)
 
-	cmd := exec.CommandContext(ctx, ffmpegBin, args...)
-	cmd.Dir = workDir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
+	runStitch := func(includeAudio bool) (string, error) {
+		cmd := exec.CommandContext(ctx, ffmpegBin, buildArgs(includeAudio)...)
+		cmd.Dir = workDir
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		return strings.TrimSpace(stderr.String()), err
+	}
+
+	msg, err := runStitch(true)
+	if err != nil && strings.Contains(strings.ToLower(msg), "sample rate not set") {
+		msg, err = runStitch(false)
+	}
+	if err != nil {
 		if msg != "" {
 			return fmt.Errorf("ffmpeg lossless stitch failed: %s", msg)
 		}

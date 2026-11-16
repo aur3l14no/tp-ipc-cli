@@ -405,3 +405,37 @@ func TestPollEventsLongPollUsesDedicatedClient(t *testing.T) {
 		t.Fatalf("expected 0 events, got %d", len(events))
 	}
 }
+
+func TestStitchTSSegmentsEmptyAudioFallback(t *testing.T) {
+	tmp := t.TempDir()
+	fakeFFmpeg := filepath.Join(tmp, "ffmpeg")
+	script := `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "0:a:0?" ]; then
+    echo "[mp4 @ 0x0] sample rate not set" >&2
+    exit 1
+  fi
+done
+out=""
+for arg in "$@"; do
+  out="$arg"
+done
+printf "OK" > "$out"
+`
+	if err := os.WriteFile(fakeFFmpeg, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seg := filepath.Join(tmp, "seg_000.ts")
+	if err := os.WriteFile(seg, []byte("ts"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outPath := filepath.Join(tmp, "out.mp4")
+	if err := stitchTSSegments(context.Background(), fakeFFmpeg, tmp, []string{seg}, []float64{2.0}, avStreamConfig{VideoCodec: "H265"}, outPath); err != nil {
+		t.Fatalf("expected stitchTSSegments to retry without audio on 'sample rate not set', got: %v", err)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil || string(data) != "OK" {
+		t.Fatalf("unexpected output file: data=%q err=%v", string(data), err)
+	}
+}
+
