@@ -1,12 +1,20 @@
 package ipc
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/aur3l14no/tp-ipc-cli/internal/config"
 )
 
 func buildMalformedSPKIDER(pub *rsa.PublicKey) []byte {
@@ -96,5 +104,128 @@ func TestMalformedCameraRSAPublicKeyAndLoginEncrypt(t *testing.T) {
 	want := obf + ":nonce_abc"
 	if string(plain) != want {
 		t.Fatalf("decrypted payload = %q, want %q", string(plain), want)
+	}
+}
+
+func TestMD5LoginHandshakeAndTimeoutRelogin(t *testing.T) {
+	gotHash, err := MD5LoginPassword("TestPass123!", "5sBC6X76")
+	if err != nil {
+		t.Fatalf("MD5LoginPassword failed: %v", err)
+	}
+	// Verified against camera web-static/lib/jsencrypt.js $.md5("TestPass123!:5sBC6X76")
+	const wantHash = "4e10e0099fd9e8edca39958e7d9c1f48"
+	if gotHash != wantHash {
+		t.Fatalf("MD5LoginPassword = %q, want %q", gotHash, wantHash)
+	}
+
+	var dsCalls atomic.Int32
+	var logins atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/pc/Content.htm":
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error_code": -40401,
+				"data": map[string]any{
+					"code":             -40407,
+					"encrypt_type":     []string{"1", "2"},
+					"key":              "MIGeMA0GCSqGSIb3DQEBAQUAA4GMADCBiAKBgOEf9cqvy0Zt1Ebwv65kxgVEGIRA8Gljs%2fSPbTgVvsWTP6RrphMn6IZHD0T46U0qR8MQYLKeMjo7VKRy5Rb5ZlHu1povGUcYZ1FqLpLu1SecFipiFLxkuAGmLZnS42WA4UzvQFPkUCS3rpvFiK7YcXABunjuXT8w%2bI7zxOI89pX5AgMBAAE%3d",
+					"nonce":            "5sBC6X76",
+					"md5_encrypt_type": 1,
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/":
+			var req struct {
+				Method string `json:"method"`
+				Login  struct {
+					Username       string `json:"username"`
+					Password       string `json:"password"`
+					EncryptType    string `json:"encrypt_type"`
+					MD5EncryptType string `json:"md5_encrypt_type"`
+				} `json:"login"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode login request: %v", err)
+			}
+			if req.Login.Username == "locked" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error_code": -40401,
+					"data": map[string]any{
+						"code":     -40404,
+						"sec_left": 120,
+					},
+				})
+				return
+			}
+			if req.Method != "do" || req.Login.Username != "admin" || req.Login.Password != wantHash || req.Login.EncryptType != "2" || req.Login.MD5EncryptType != "1" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error_code": -40401,
+					"data":       map[string]any{"code": -40401},
+				})
+				return
+			}
+			n := logins.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error_code": 0,
+				"stok":       "md5stok_" + string(rune('0'+n)),
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/ds"):
+			if dsCalls.Add(1) == 1 {
+				// Simulate ESESSIONTIMEOUT (-40403) on first call to verify auto-relogin
+				_ = json.NewEncoder(w).Encode(map[string]any{"error_code": -40403})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error_code": 0,
+				"device_info": map[string]any{
+					"basic_info": map[string]any{"device_model": "TL-IPC44AW"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	scheme, host, port, err := config.ParseHostInput(srv.URL)
+	if err != nil {
+		t.Fatalf("ParseHostInput: %v", err)
+	}
+	client, err := NewClient(config.Settings{
+		Scheme:   scheme,
+		Host:     host,
+		HTTPPort: port,
+		User:     "admin",
+		Password: "TestPass123!",
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	info, err := client.DeviceInfo(context.Background())
+	if err != nil {
+		t.Fatalf("DeviceInfo over md5_encrypt_type=1 failed: %v", err)
+	}
+	if info.Model != "TL-IPC44AW" {
+		t.Fatalf("DeviceInfo.Model = %q, want TL-IPC44AW", info.Model)
+	}
+	if logins.Load() != 2 {
+		t.Fatalf("expected 2 logins (initial + relogin after -40403), got %d", logins.Load())
+	}
+
+	// Verify lockout surfaces remaining seconds
+	lockedClient, _ := NewClient(config.Settings{
+		Scheme:   scheme,
+		Host:     host,
+		HTTPPort: port,
+		User:     "locked",
+		Password: "TestPass123!",
+	})
+	_, err = lockedClient.DeviceInfo(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != ErrCodeLocked || !strings.Contains(err.Error(), "120s remaining") {
+		t.Fatalf("expected lockout APIError with remaining seconds, got %v", err)
 	}
 }

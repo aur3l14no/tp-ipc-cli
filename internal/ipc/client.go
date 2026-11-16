@@ -21,9 +21,14 @@ import (
 
 const (
 	ErrCodeSessionExpired  = -40401
-	ErrCodeNeedsActivation = -40414
+	ErrCodeSessionTimeout  = -40403
+	ErrCodeLocked          = -40404
 	ErrCodeNeedsPassChange = -40405
+	ErrCodeClientFull      = -40406
 	ErrCodeActivated       = -40407
+	ErrCodeLockedForever   = -40408
+	ErrCodeSuperPwdSuccess = -40409
+	ErrCodeNeedsActivation = -40414
 )
 
 type APIError struct {
@@ -42,12 +47,22 @@ func describeErrorCode(code int) string {
 	switch code {
 	case -40401:
 		return "session expired or unauthorized"
+	case -40403:
+		return "session timed out"
+	case -40404, -40413:
+		return "account temporarily locked due to failed attempts"
 	case -40405:
 		return "password change required"
+	case -40406:
+		return "too many active camera sessions"
 	case -40407:
 		return "authentication required"
-	case -40413:
-		return "account temporarily locked due to failed attempts"
+	case -40408:
+		return "account locked"
+	case -40410:
+		return "login nonce expired"
+	case -40411:
+		return "unsupported username"
 	case -40414:
 		return "camera requires initial activation"
 	case -40209, -40210:
@@ -189,11 +204,22 @@ func macosLocalNetworkHint(err error, host string) string {
 type challengePayload struct {
 	ErrorCode int `json:"error_code"`
 	Data      struct {
-		Code        int      `json:"code"`
-		Key         string   `json:"key"`
-		Nonce       string   `json:"nonce"`
-		EncryptType []string `json:"encrypt_type"`
+		Code           int      `json:"code"`
+		Key            string   `json:"key"`
+		Nonce          string   `json:"nonce"`
+		EncryptType    []string `json:"encrypt_type"`
+		MD5EncryptType any      `json:"md5_encrypt_type"`
+		SecLeft        int      `json:"sec_left"`
 	} `json:"data"`
+}
+
+func containsString(items []string, target string) bool {
+	for _, s := range items {
+		if s == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) fetchChallenge(ctx context.Context) (challengePayload, int, error) {
@@ -225,28 +251,59 @@ func (c *Client) ensureSession(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if status != http.StatusUnauthorized && ch.Data.Key == "" {
+	if status != http.StatusUnauthorized && ch.Data.Key == "" && ch.Data.Nonce == "" {
 		return "", fmt.Errorf("camera did not return login challenge (HTTP %d)", status)
 	}
 	if ch.Data.Code == ErrCodeNeedsActivation {
 		return "", errors.New("camera is unactivated; complete initial activation in the TP-LINK app or web UI first")
 	}
-	if ch.Data.Key == "" || ch.Data.Nonce == "" {
-		return "", fmt.Errorf("incomplete login challenge from camera (code %d)", ch.Data.Code)
+	if ch.Data.Code == ErrCodeNeedsPassChange {
+		return "", errors.New("camera requires an initial password change in the TP-LINK app or web UI first")
 	}
 
-	cipherPwd, err := EncryptLoginPassword(c.cfg.Password, ch.Data.Nonce, ch.Data.Key)
-	if err != nil {
-		return "", err
+	md5Mode := jsonInt(ch.Data.MD5EncryptType, 0) == 1
+	hasRSA := containsString(ch.Data.EncryptType, "2") || (len(ch.Data.EncryptType) == 0 && ch.Data.Key != "")
+	encType := "1"
+	if hasRSA {
+		encType = "2"
 	}
 
+	var cipherPwd string
+	switch {
+	case md5Mode:
+		if ch.Data.Nonce == "" {
+			return "", fmt.Errorf("incomplete login challenge from camera (code %d)", ch.Data.Code)
+		}
+		cipherPwd, err = MD5LoginPassword(c.cfg.Password, ch.Data.Nonce)
+		if err != nil {
+			return "", err
+		}
+	case hasRSA:
+		if ch.Data.Key == "" || ch.Data.Nonce == "" {
+			return "", fmt.Errorf("incomplete login challenge from camera (code %d)", ch.Data.Code)
+		}
+		cipherPwd, err = EncryptLoginPassword(c.cfg.Password, ch.Data.Nonce, ch.Data.Key)
+		if err != nil {
+			return "", err
+		}
+	default:
+		cipherPwd, err = SecurityEncode(c.cfg.Password)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	loginFields := map[string]any{
+		"username":     c.cfg.User,
+		"password":     cipherPwd,
+		"encrypt_type": encType,
+	}
+	if md5Mode {
+		loginFields["md5_encrypt_type"] = "1"
+	}
 	loginReq := map[string]any{
 		"method": "do",
-		"login": map[string]any{
-			"username":     c.cfg.User,
-			"password":     cipherPwd,
-			"encrypt_type": "2",
-		},
+		"login":  loginFields,
 	}
 	reqBytes, _ := json.Marshal(loginReq)
 	lStatus, lBody, err := c.rawHTTP(ctx, c.cfg.HTTPBaseURL()+"/", http.MethodPost, reqBytes, nil)
@@ -257,18 +314,28 @@ func (c *Client) ensureSession(ctx context.Context) (string, error) {
 		ErrorCode int    `json:"error_code"`
 		Stok      string `json:"stok"`
 		Data      struct {
-			Code int `json:"code"`
+			Code    int `json:"code"`
+			SecLeft int `json:"sec_left"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(lBody, &loginResp); err != nil {
 		return "", fmt.Errorf("invalid JSON from camera login (HTTP %d)", lStatus)
 	}
-	if loginResp.ErrorCode != 0 || loginResp.Stok == "" {
+	loginOK := (loginResp.ErrorCode == 0 || loginResp.ErrorCode == ErrCodeSuperPwdSuccess) && loginResp.Stok != ""
+	if !loginOK {
 		code := loginResp.ErrorCode
 		if loginResp.Data.Code != 0 {
 			code = loginResp.Data.Code
 		}
-		return "", &APIError{Code: code, Message: "camera login rejected: " + describeErrorCode(code)}
+		desc := describeErrorCode(code)
+		if code == ErrCodeLocked && loginResp.Data.SecLeft > 0 {
+			desc = fmt.Sprintf("account temporarily locked (%ds remaining)", loginResp.Data.SecLeft)
+		}
+		msg := "camera login rejected"
+		if desc != "" {
+			msg += ": " + desc
+		}
+		return "", &APIError{Code: code, Message: msg}
 	}
 	decodedStok, err := url.PathUnescape(loginResp.Stok)
 	if err != nil {
@@ -312,7 +379,7 @@ func (c *Client) DoDS(ctx context.Context, payload any) (map[string]any, error) 
 			return nil, errors.New("invalid JSON from camera /ds")
 		}
 		errCode := jsonInt(result["error_code"], -1)
-		if errCode == ErrCodeSessionExpired {
+		if errCode == ErrCodeSessionExpired || errCode == ErrCodeSessionTimeout {
 			c.invalidateStok(stok)
 			continue
 		}

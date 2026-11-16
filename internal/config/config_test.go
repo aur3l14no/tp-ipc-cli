@@ -107,3 +107,45 @@ func TestProfileNameValidationAndSanitization(t *testing.T) {
 		t.Fatalf("unexpected sanitized token %q", got)
 	}
 }
+
+func TestLoadForConfigureDoesNotLeakDefaultProfile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	// Save an existing default camera with custom ports, user, and password
+	_, err := Save(Settings{
+		Name:     "desk",
+		Host:     "10.100.20.50",
+		HTTPPort: 8080,
+		User:     "desk_admin",
+		Password: "desk_secret_password",
+	}, true)
+	if err != nil {
+		t.Fatalf("Save desk: %v", err)
+	}
+
+	// Adding a brand-new named profile ("dogee") must NOT inherit desk's password, user, or port
+	dogeeCfg, err := LoadForConfigure(Overrides{
+		Camera: "dogee",
+		Host:   "10.100.20.60",
+	})
+	if err != nil {
+		t.Fatalf("LoadForConfigure dogee: %v", err)
+	}
+	if dogeeCfg.Host != "10.100.20.60" || dogeeCfg.HTTPPort != 80 || dogeeCfg.User != "admin" || dogeeCfg.Password != "" {
+		t.Fatalf("LoadForConfigure leaked default profile settings into new profile: %+v", dogeeCfg)
+	}
+
+	// Indexed env var IPC_PASSWORD_DOGEE should work even before "dogee" exists in config.json
+	t.Setenv("IPC_PASSWORD_DOGEE", "dogee_env_pw")
+	dogeeWithEnv, err := LoadForConfigure(Overrides{
+		Camera: "dogee",
+		Host:   "https://10.100.20.60",
+	})
+	if err != nil {
+		t.Fatalf("LoadForConfigure dogee with env: %v", err)
+	}
+	if dogeeWithEnv.Scheme != "https" || dogeeWithEnv.HTTPPort != 443 || dogeeWithEnv.Password != "dogee_env_pw" {
+		t.Fatalf("unexpected dogee env/https settings: %+v", dogeeWithEnv)
+	}
+}

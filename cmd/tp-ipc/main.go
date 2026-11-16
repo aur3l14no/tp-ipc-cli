@@ -595,23 +595,9 @@ func cmdConfigure(ctx context.Context, g globalOptions, subArgs []string, stdin 
 	}
 
 	profileName := strings.TrimSpace(g.ov.Camera)
-	// Load without failing if target profile does not exist yet
-	ovNoCam := g.ov
-	ovNoCam.Camera = ""
-	cfg, _ := config.Load(ovNoCam)
-	if profileName != "" {
-		if st, err := config.LoadStore(); err == nil {
-			if existing, ok := st.Cameras[profileName]; ok && g.ov.Host == "" {
-				cfg.Host = existing.Host
-				cfg.Scheme = existing.Scheme
-				cfg.HTTPPort = existing.HTTPPort
-				cfg.RTSPPort = existing.RTSPPort
-				cfg.ONVIFPort = existing.ONVIFPort
-				if g.ov.User == "" {
-					cfg.User = existing.User
-				}
-			}
-		}
+	cfg, err := config.LoadForConfigure(g.ov)
+	if err != nil {
+		return err
 	}
 
 	reader := bufio.NewReader(stdin)
@@ -629,20 +615,24 @@ func cmdConfigure(ctx context.Context, g globalOptions, subArgs []string, stdin 
 		cfg.Host = host
 		if port > 0 {
 			cfg.HTTPPort = port
+		} else if scheme == "https" && cfg.HTTPPort == config.DefaultHTTPPort {
+			cfg.HTTPPort = 443
 		}
 	}
 	if cfg.Password == "" {
-		fmt.Fprintf(stderr, "Camera username [%s]: ", cfg.User)
-		uLine, _ := reader.ReadString('\n')
-		if u := strings.TrimSpace(uLine); u != "" {
-			cfg.User = u
+		if strings.TrimSpace(g.ov.User) == "" {
+			fmt.Fprintf(stderr, "Camera username [%s]: ", cfg.User)
+			uLine, _ := reader.ReadString('\n')
+			if u := strings.TrimSpace(uLine); u != "" {
+				cfg.User = u
+			}
 		}
 		fmt.Fprint(stderr, "Camera password: ")
-		pLine, err := reader.ReadString('\n')
-		if err != nil && len(strings.TrimRight(pLine, "\r\n")) == 0 {
-			return errors.New("camera password is required")
+		pw, err := readInteractivePassword(ctx, stdin, reader, stderr)
+		if err != nil {
+			return err
 		}
-		cfg.Password = strings.TrimRight(pLine, "\r\n")
+		cfg.Password = pw
 	}
 
 	probeClient, err := ipc.NewClient(config.Settings{
@@ -692,6 +682,55 @@ func cmdConfigure(ctx context.Context, g globalOptions, subArgs []string, stdin 
 	}
 	fmt.Fprintf(stdout, "Verified %s (%s) as profile %q. Saved to %s (0600)\n", info.Model, info.Firmware, profileName, savedPath)
 	return nil
+}
+
+func readInteractivePassword(ctx context.Context, stdin io.Reader, reader *bufio.Reader, stderr io.Writer) (string, error) {
+	var (
+		restore = func() {}
+		hidden  bool
+	)
+	if reader.Buffered() == 0 {
+		restore, hidden = disableTerminalEcho(stdin)
+	}
+	defer restore()
+
+	type readResult struct {
+		line string
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		line, err := reader.ReadString('\n')
+		ch <- readResult{line: line, err: err}
+	}()
+
+	var (
+		pLine string
+		err   error
+	)
+	select {
+	case <-ctx.Done():
+		restore()
+		if hidden {
+			fmt.Fprintln(stderr)
+		}
+		return "", ctx.Err()
+	case res := <-ch:
+		restore()
+		if hidden {
+			fmt.Fprintln(stderr)
+		}
+		pLine, err = res.line, res.err
+	}
+
+	pw := strings.TrimRight(pLine, "\r\n")
+	if pw == "" {
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		return "", errors.New("camera password is required")
+	}
+	return pw, nil
 }
 
 func cmdSnap(ctx context.Context, client *ipc.Client, g globalOptions, subArgs []string, stdout io.Writer) error {
