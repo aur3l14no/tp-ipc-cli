@@ -1,0 +1,8 @@
+/tp-ipc
+/dist/
+*.jpg
+*.jpeg
+*.mkv
+*.mp4
+*.wav
+.DS_Store

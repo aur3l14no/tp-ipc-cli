@@ -1,0 +1,438 @@
+package ipc
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"sync"
+	"time"
+
+	"github.com/aur3l14no/tp-ipc-cli/internal/config"
+)
+
+const (
+	ErrCodeSessionExpired  = -40401
+	ErrCodeNeedsActivation = -40414
+	ErrCodeNeedsPassChange = -40405
+	ErrCodeActivated       = -40407
+)
+
+type APIError struct {
+	Code    int
+	Message string
+}
+
+func (e *APIError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("camera API error %d (%s)", e.Code, e.Message)
+	}
+	return fmt.Sprintf("camera API error %d", e.Code)
+}
+
+func describeErrorCode(code int) string {
+	switch code {
+	case -40401:
+		return "session expired or unauthorized"
+	case -40405:
+		return "password change required"
+	case -40407:
+		return "authentication required"
+	case -40413:
+		return "account temporarily locked due to failed attempts"
+	case -40414:
+		return "camera requires initial activation"
+	case -40209, -40210:
+		return "invalid parameter or unsupported action"
+	case -71108:
+		return "invalid recording date parameter"
+	case -71112:
+		return "invalid playback session user_id"
+	default:
+		return ""
+	}
+}
+
+type Client struct {
+	cfg            config.Settings
+	httpClient     *http.Client
+	longPollClient *http.Client
+
+	loginMu sync.Mutex
+	stateMu sync.RWMutex
+	stok    string
+	userID  int
+}
+
+func NewClient(cfg config.Settings) (*Client, error) {
+	if cfg.Host == "" {
+		return nil, errors.New("camera host is not configured (set IPC_HOST, --host, or run `tp-ipc configure`)")
+	}
+	dialFn := (&net.Dialer{
+		Timeout:   6 * time.Second,
+		KeepAlive: 15 * time.Second,
+	}).DialContext
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: true, // Local camera uses self-signed certs when HTTPS is enabled
+		MinVersion:         tls.VersionTLS10,
+	}
+	transport := &http.Transport{
+		Proxy:                 nil, // Never route LAN camera traffic through system/env HTTP proxies
+		DialContext:           dialFn,
+		TLSClientConfig:       tlsCfg,
+		MaxIdleConns:          4,
+		IdleConnTimeout:       30 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+	}
+	longPollTransport := &http.Transport{
+		Proxy:                 nil,
+		DialContext:           dialFn,
+		TLSClientConfig:       tlsCfg.Clone(),
+		DisableKeepAlives:     true,
+		ResponseHeaderTimeout: 0, // Governed by per-request context deadline during ONVIF PullMessages
+	}
+	return &Client{
+		cfg: cfg,
+		httpClient: &http.Client{
+			Transport: transport,
+			Timeout:   12 * time.Second,
+		},
+		longPollClient: &http.Client{
+			Transport: longPollTransport,
+		},
+	}, nil
+}
+
+func (c *Client) Settings() config.Settings {
+	return c.cfg
+}
+
+func (c *Client) currentStok() string {
+	c.stateMu.RLock()
+	stok := c.stok
+	c.stateMu.RUnlock()
+	return stok
+}
+
+func (c *Client) Redact(text string) string {
+	return c.cfg.Redact(text, c.currentStok())
+}
+
+func (c *Client) rawHTTP(ctx context.Context, targetURL string, method string, body []byte, headers map[string]string) (int, []byte, error) {
+	return c.rawHTTPWithClient(ctx, c.httpClient, targetURL, method, body, headers)
+}
+
+func (c *Client) rawHTTPLongPoll(ctx context.Context, targetURL string, method string, body []byte, headers map[string]string) (int, []byte, error) {
+	hc := c.longPollClient
+	if hc == nil {
+		hc = c.httpClient
+	}
+	return c.rawHTTPWithClient(ctx, hc, targetURL, method, body, headers)
+}
+
+func (c *Client) rawHTTPWithClient(ctx context.Context, hc *http.Client, targetURL string, method string, body []byte, headers map[string]string) (int, []byte, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, bodyReader)
+	if err != nil {
+		return 0, nil, errors.New(c.Redact(err.Error()))
+	}
+	req.Header.Set("User-Agent", "TP-LINK_APP")
+	if body != nil && len(headers) == 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if _, isSOAP := headers["SOAPAction"]; isSOAP {
+		// TP-Link's embedded ONVIF daemon on port 2020 corrupts buffers on reused keep-alive sockets.
+		req.Close = true
+	}
+
+	resp, err := hc.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("camera HTTP request failed: %s", c.Redact(err.Error()))
+	}
+	defer resp.Body.Close()
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("read camera HTTP response: %s", c.Redact(err.Error()))
+	}
+	return resp.StatusCode, respBytes, nil
+}
+
+type challengePayload struct {
+	ErrorCode int `json:"error_code"`
+	Data      struct {
+		Code        int      `json:"code"`
+		Key         string   `json:"key"`
+		Nonce       string   `json:"nonce"`
+		EncryptType []string `json:"encrypt_type"`
+	} `json:"data"`
+}
+
+func (c *Client) fetchChallenge(ctx context.Context) (challengePayload, int, error) {
+	var ch challengePayload
+	status, body, err := c.rawHTTP(ctx, c.cfg.HTTPBaseURL()+"/pc/Content.htm", http.MethodGet, nil, nil)
+	if err != nil {
+		return ch, 0, err
+	}
+	if err := json.Unmarshal(body, &ch); err != nil {
+		return ch, status, fmt.Errorf("unexpected response from /pc/Content.htm (HTTP %d)", status)
+	}
+	return ch, status, nil
+}
+
+func (c *Client) ensureSession(ctx context.Context) (string, error) {
+	if stok := c.currentStok(); stok != "" {
+		return stok, nil
+	}
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+
+	if stok := c.currentStok(); stok != "" {
+		return stok, nil
+	}
+	if c.cfg.User == "" || c.cfg.Password == "" {
+		return "", errors.New("camera credentials missing (set IPC_PASSWORD, --password-stdin, or run `tp-ipc configure`)")
+	}
+	ch, status, err := c.fetchChallenge(ctx)
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusUnauthorized && ch.Data.Key == "" {
+		return "", fmt.Errorf("camera did not return login challenge (HTTP %d)", status)
+	}
+	if ch.Data.Code == ErrCodeNeedsActivation {
+		return "", errors.New("camera is unactivated; complete initial activation in the TP-LINK app or web UI first")
+	}
+	if ch.Data.Key == "" || ch.Data.Nonce == "" {
+		return "", fmt.Errorf("incomplete login challenge from camera (code %d)", ch.Data.Code)
+	}
+
+	cipherPwd, err := EncryptLoginPassword(c.cfg.Password, ch.Data.Nonce, ch.Data.Key)
+	if err != nil {
+		return "", err
+	}
+
+	loginReq := map[string]any{
+		"method": "do",
+		"login": map[string]any{
+			"username":     c.cfg.User,
+			"password":     cipherPwd,
+			"encrypt_type": "2",
+		},
+	}
+	reqBytes, _ := json.Marshal(loginReq)
+	lStatus, lBody, err := c.rawHTTP(ctx, c.cfg.HTTPBaseURL()+"/", http.MethodPost, reqBytes, nil)
+	if err != nil {
+		return "", err
+	}
+	var loginResp struct {
+		ErrorCode int    `json:"error_code"`
+		Stok      string `json:"stok"`
+		Data      struct {
+			Code int `json:"code"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(lBody, &loginResp); err != nil {
+		return "", fmt.Errorf("invalid JSON from camera login (HTTP %d)", lStatus)
+	}
+	if loginResp.ErrorCode != 0 || loginResp.Stok == "" {
+		code := loginResp.ErrorCode
+		if loginResp.Data.Code != 0 {
+			code = loginResp.Data.Code
+		}
+		return "", &APIError{Code: code, Message: "camera login rejected: " + describeErrorCode(code)}
+	}
+	decodedStok, err := url.PathUnescape(loginResp.Stok)
+	if err != nil {
+		decodedStok = loginResp.Stok
+	}
+	c.stateMu.Lock()
+	c.stok = decodedStok
+	c.userID = 0
+	c.stateMu.Unlock()
+	return decodedStok, nil
+}
+
+// DoDS executes a JSON request against /stok=<token>/ds, logging in and retrying once on session expiry.
+func (c *Client) DoDS(ctx context.Context, payload any) (map[string]any, error) {
+	reqBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		stok, err := c.ensureSession(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		endpoint := fmt.Sprintf("%s/stok=%s/ds", c.cfg.HTTPBaseURL(), url.PathEscape(stok))
+		status, body, err := c.rawHTTP(ctx, endpoint, http.MethodPost, reqBytes, nil)
+		if err != nil {
+			return nil, err
+		}
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			c.invalidateStok(stok)
+			continue
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("camera /ds returned HTTP %d", status)
+		}
+
+		var result map[string]any
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, errors.New("invalid JSON from camera /ds")
+		}
+		errCode := jsonInt(result["error_code"], -1)
+		if errCode == ErrCodeSessionExpired {
+			c.invalidateStok(stok)
+			continue
+		}
+		if errCode != 0 {
+			return nil, &APIError{Code: errCode, Message: describeErrorCode(errCode)}
+		}
+		return result, nil
+	}
+	return nil, errors.New("camera session expired after retry")
+}
+
+// DoDSWithUserID obtains the playback session user_id and runs a factory-built /ds request.
+func (c *Client) DoDSWithUserID(ctx context.Context, buildPayload func(userID int) any) (map[string]any, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		uid, err := c.ensureUserID(ctx)
+		if err != nil {
+			return nil, err
+		}
+		res, err := c.DoDS(ctx, buildPayload(uid))
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Code == -71112 && attempt == 0 {
+			c.stateMu.Lock()
+			c.userID = 0
+			c.stateMu.Unlock()
+			continue
+		}
+		return res, err
+	}
+	return nil, errors.New("failed to acquire valid playback user_id")
+}
+
+func (c *Client) ensureUserID(ctx context.Context) (int, error) {
+	c.stateMu.RLock()
+	uid := c.userID
+	c.stateMu.RUnlock()
+	if uid > 0 {
+		return uid, nil
+	}
+
+	res, err := c.DoDS(ctx, map[string]any{
+		"method": "do",
+		"system": map[string]any{"get_user_id": "null"},
+	})
+	if err != nil {
+		return 0, err
+	}
+	uid = jsonInt(res["user_id"], 0)
+	if uid <= 0 {
+		return 0, errors.New("camera did not return a valid user_id")
+	}
+	c.stateMu.Lock()
+	c.userID = uid
+	c.stateMu.Unlock()
+	return uid, nil
+}
+
+func (c *Client) invalidateStok(old string) {
+	c.stateMu.Lock()
+	if c.stok == old {
+		c.stok = ""
+		c.userID = 0
+	}
+	c.stateMu.Unlock()
+}
+
+func (c *Client) GetModule(ctx context.Context, module string, sections ...string) (map[string]any, error) {
+	res, err := c.DoDS(ctx, map[string]any{
+		"method": "get",
+		module:   map[string]any{"name": sections},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return asMap(res[module]), nil
+}
+
+func (c *Client) SetModule(ctx context.Context, module, section string, value any) (map[string]any, error) {
+	return c.DoDS(ctx, map[string]any{
+		"method": "set",
+		module:   map[string]any{section: value},
+	})
+}
+
+func (c *Client) ActionModule(ctx context.Context, module, action string, value any) (map[string]any, error) {
+	return c.DoDS(ctx, map[string]any{
+		"method": "do",
+		module:   map[string]any{action: value},
+	})
+}
+
+func asMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok && m != nil {
+		return m
+	}
+	return map[string]any{}
+}
+
+func jsonInt(v any, fallback int) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	case json.Number:
+		if i, err := x.Int64(); err == nil {
+			return int(i)
+		}
+	case string:
+		var n int
+		if _, err := fmt.Sscanf(x, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func jsonFloat(v any, fallback float64) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case int:
+		return float64(x)
+	case string:
+		var f float64
+		if _, err := fmt.Sscanf(x, "%f", &f); err == nil {
+			return f
+		}
+	}
+	return fallback
+}
+
+func jsonStr(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprint(v)
+}

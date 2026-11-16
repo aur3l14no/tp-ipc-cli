@@ -1,0 +1,70 @@
+# Contributing & Development
+
+`tp-ipc` is a pure-Go (`CGO_ENABLED=0`) project using only the Go standard
+library.
+
+## Prerequisites
+
+- Go 1.22 or later
+- `ffmpeg` on `PATH` (optional for unit tests; needed for live snapshot, clip,
+  SD playback export, and speaker talkback integration checks)
+
+## Build & Test
+
+```sh
+make build            # Build native static binary ./tp-ipc
+make test             # Run all unit tests with CGO_ENABLED=0
+go vet ./...          # Static analysis
+make dist             # Cross-compile darwin/{arm64,amd64} & linux/{arm64,amd64} into ./dist/
+```
+
+## Layout
+
+| Path | Responsibility |
+| --- | --- |
+| `cmd/tp-ipc/main.go` | CLI flag parsing, subcommand dispatch, human & `--json` output |
+| `internal/config/` | Multi-camera store (`~/.config/tp-ipc/config.json`, `0600`), environment variable overlays, profile validation |
+| `internal/ipc/auth.go` | Unauthenticated `/pc/Content.htm` activation probe and RSA PKCS#1 v1.5 `/ds` challenge-response cipher |
+| `internal/ipc/client.go` | Session lifecycle, `stok` token renewal, credential redaction |
+| `internal/ipc/device.go` | `/stok=<token>/ds` JSON API wrappers (status, detectors, night vision, LED, speaker, presets, SD index) |
+| `internal/ipc/discover.go` | ONVIF WS-Discovery UDP multicast (`239.255.255.250:3702`) and `/22`–`/32` HTTP CIDR scan |
+| `internal/ipc/onvif.go` | ONVIF Profile S/T WS-Security `PasswordDigest` PTZ control and PullPoint event subscriptions |
+| `internal/ipc/media.go` | RTSP single-frame JPEG capture (`stream1`/`stream2` + digital crop), lossless clip muxing, `MULTITRANS` G.711 A-law speaker talkback |
+| `internal/ipc/playback.go` | Historical SD card time-range export over RTSP `MULTITRANS` (`playback`) + RTP-over-TCP demuxing into lossless `.mp4`/`.mkv` |
+| `internal/mcp/server.go` | MCP `stdio` JSON-RPC 2.0 server (`2024-11-05` through `2025-11-25`) caching per-camera clients |
+
+## Mainland `TL-IPC` Protocol Notes
+
+Mainland China TP-LINK `TL-IPC` firmware differs from international Tapo
+firmware in several subtle ways that the codebase handles directly:
+
+- **RSA public key encoding (`internal/ipc/auth.go`).** The unauthenticated
+  login challenge returns an URL-encoded base64 DER `SubjectPublicKeyInfo` whose
+  2048-bit modulus omits the leading `0x00` sign byte required by strict ASN.1
+  DER parsers. `parseLooseRSAPublicKey` reconstructs the modulus and exponent
+  without failing on non-canonical integer padding, then encrypts in 245-byte
+  PKCS#1 v1.5 blocks.
+- **Session concurrency (`internal/ipc/client.go`).** Login serialization uses a
+  dedicated `loginMu` separate from `stateMu` so transport error redaction never
+  re-enters a held mutex.
+- **ONVIF + `/ds` fallback (`internal/ipc/onvif.go`).** Pan/tilt queries and
+  moves prefer ONVIF port `2020` (`WS-Security` `PasswordDigest`) and fall back
+  to `/stok=<token>/ds` motor calls when port `2020` is filtered. PullPoint
+  `PullMessages` long-polls use a dedicated HTTP client whose timeout exceeds
+  the requested wait window.
+- **Historical SD export (`internal/ipc/playback.go`).** The camera streams
+  historical recordings over RTSP `MULTITRANS` on port `554`: JSON control
+  frames (`type: "request"` / `"notification"`) and interleaved RTP video/audio
+  packets share one TCP connection. Firmware reports `G711A`/`G711U` in the
+  `replay` notification, which must be mapped to IANA SDP names `PCMA`/`PCMU`
+  (`8000 Hz`) so `ffmpeg` decodes the microphone track alongside lossless H.265
+  or H.264 video (`-c:v copy`).
+
+## Releasing
+
+1. Update `ServerVersion` in `internal/mcp/server.go` and `VERSION` in
+   `Makefile`.
+2. Run `go vet ./... && make test && make VERSION=<x.y.z> dist`.
+3. Commit, tag `v<x.y.z>`, push to `main`, and publish a GitHub Release with the
+   files in `dist/` (`tp-ipc-darwin-arm64`, `tp-ipc-darwin-amd64`,
+   `tp-ipc-linux-arm64`, `tp-ipc-linux-amd64`, and `SHA256SUMS`).
