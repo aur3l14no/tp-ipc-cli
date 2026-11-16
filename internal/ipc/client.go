@@ -11,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/aur3l14no/tp-ipc-cli/internal/config"
@@ -159,7 +161,11 @@ func (c *Client) rawHTTPWithClient(ctx context.Context, hc *http.Client, targetU
 
 	resp, err := hc.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("camera HTTP request failed: %s", c.Redact(err.Error()))
+		msg := c.Redact(err.Error())
+		if hint := macosLocalNetworkHint(err, c.cfg.Host); hint != "" {
+			msg += " " + hint
+		}
+		return 0, nil, fmt.Errorf("camera HTTP request failed: %s", msg)
 	}
 	defer resp.Body.Close()
 	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
@@ -167,6 +173,17 @@ func (c *Client) rawHTTPWithClient(ctx context.Context, hc *http.Client, targetU
 		return resp.StatusCode, nil, fmt.Errorf("read camera HTTP response: %s", c.Redact(err.Error()))
 	}
 	return resp.StatusCode, respBytes, nil
+}
+
+func macosLocalNetworkHint(err error, host string) string {
+	if runtime.GOOS != "darwin" || !errors.Is(err, syscall.EHOSTUNREACH) {
+		return ""
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || (!ip.IsPrivate() && !ip.IsLinkLocalUnicast()) {
+		return ""
+	}
+	return "(on macOS, EHOSTUNREACH / \"no route to host\" to a local LAN IP usually means System Settings -> Privacy & Security -> Local Network is turned off for your terminal or host app)"
 }
 
 type challengePayload struct {

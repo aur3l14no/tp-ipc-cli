@@ -9,9 +9,11 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/aur3l14no/tp-ipc-cli/internal/config"
@@ -29,7 +31,54 @@ type DiscoveredCamera struct {
 	ActivationState string   `json:"activation_state,omitempty"`
 }
 
+type lanInterfaceTarget struct {
+	localIP   net.IP
+	broadcast net.IP
+}
+
+func activeLANIPv4Targets() []lanInterfaceTarget {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var targets []lanInterfaceTarget
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagPointToPoint != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipNet.IP.To4()
+			if ip4 == nil || ip4.IsLoopback() {
+				continue
+			}
+			var bcast net.IP
+			if mask := ipNet.Mask; len(mask) == net.IPv4len {
+				bcast = net.IPv4(
+					ip4[0]|^mask[0],
+					ip4[1]|^mask[1],
+					ip4[2]|^mask[2],
+					ip4[3]|^mask[3],
+				)
+			}
+			targets = append(targets, lanInterfaceTarget{
+				localIP:   ip4,
+				broadcast: bcast,
+			})
+		}
+	}
+	return targets
+}
+
 // DiscoverLAN broadcasts an ONVIF WS-Discovery UDP multicast probe to 239.255.255.250:3702
+// across every active non-point-to-point IPv4 LAN interface (bypassing VPN/proxy utun routes)
 // and checks whether responding hosts expose TP-Link's /pc/Content.htm challenge.
 func DiscoverLAN(ctx context.Context, timeout time.Duration) ([]DiscoveredCamera, error) {
 	if timeout <= 0 {
@@ -62,43 +111,126 @@ func DiscoverLAN(ctx context.Context, timeout time.Duration) ([]DiscoveredCamera
 	mcastAddr := &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 3702}
 	bcastAddr := &net.UDPAddr{IP: net.IPv4bcast, Port: 3702}
 
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-	if err != nil {
-		return nil, fmt.Errorf("bind UDP discovery socket: %w", err)
+	targets := activeLANIPv4Targets()
+	if len(targets) == 0 {
+		targets = []lanInterfaceTarget{{localIP: net.IPv4zero}}
 	}
-	defer conn.Close()
 
-	_, _ = conn.WriteToUDP([]byte(probeXML), mcastAddr)
-	_, _ = conn.WriteToUDP([]byte(probeXML), bcastAddr)
+	type probeSocket struct {
+		conn  *net.UDPConn
+		dests []*net.UDPAddr
+	}
+	var (
+		sockets         []probeSocket
+		sentCount       int
+		hostUnreachErrs int
+	)
+	defer func() {
+		for _, s := range sockets {
+			_ = s.conn.Close()
+		}
+	}()
+
+	for _, t := range targets {
+		conn, listenErr := net.ListenUDP("udp4", &net.UDPAddr{IP: t.localIP, Port: 0})
+		if listenErr != nil {
+			continue
+		}
+
+		if rawConn, scErr := conn.SyscallConn(); scErr == nil {
+			_ = rawConn.Control(func(fd uintptr) {
+				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+				if ip4 := t.localIP.To4(); ip4 != nil && !ip4.Equal(net.IPv4zero) {
+					var addr [4]byte
+					copy(addr[:], ip4)
+					_ = syscall.SetsockoptInet4Addr(int(fd), syscall.IPPROTO_IP, syscall.IP_MULTICAST_IF, addr)
+				}
+			})
+		}
+
+		dests := []*net.UDPAddr{mcastAddr}
+		if t.broadcast != nil && !t.broadcast.Equal(net.IPv4bcast) {
+			dests = append(dests, &net.UDPAddr{IP: t.broadcast, Port: 3702})
+		} else {
+			dests = append(dests, bcastAddr)
+		}
+		sockets = append(sockets, probeSocket{conn: conn, dests: dests})
+		for _, dst := range dests {
+			if _, wErr := conn.WriteToUDP([]byte(probeXML), dst); wErr != nil {
+				if errors.Is(wErr, syscall.EHOSTUNREACH) {
+					hostUnreachErrs++
+				}
+			} else {
+				sentCount++
+			}
+		}
+	}
+
+	if len(sockets) == 0 {
+		return nil, errors.New("failed to bind any UDPv4 socket for WS-Discovery")
+	}
+	if sentCount == 0 && hostUnreachErrs > 0 && runtime.GOOS == "darwin" {
+		return nil, errors.New("UDP LAN discovery blocked with EHOSTUNREACH (no route to host): enable System Settings -> Privacy & Security -> Local Network for your terminal or host app")
+	}
 
 	deadline := time.Now().Add(timeout)
-	byHost := make(map[string]DiscoveredCamera)
-	buf := make([]byte, 16384)
-
-	for time.Now().Before(deadline) {
-		if err := ctx.Err(); err != nil {
-			break
-		}
-		rem := time.Until(deadline)
-		if rem > 250*time.Millisecond {
-			rem = 250 * time.Millisecond
-		}
-		_ = conn.SetReadDeadline(time.Now().Add(rem))
-		n, remote, rErr := conn.ReadFromUDP(buf)
-		if n > 0 {
-			cam, ok := parseProbeMatch(buf[:n], remote.IP.String())
-			if ok && cam.Host != "" {
-				byHost[cam.Host] = cam
+	retryDone := make(chan struct{})
+	defer close(retryDone)
+	if timeout >= 700*time.Millisecond {
+		go func() {
+			timer := time.NewTimer(350 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				for _, s := range sockets {
+					for _, dst := range s.dests {
+						_, _ = s.conn.WriteToUDP([]byte(probeXML), dst)
+					}
+				}
+			case <-ctx.Done():
+			case <-retryDone:
 			}
-		}
-		if rErr != nil {
-			var netErr net.Error
-			if errors.As(rErr, &netErr) && netErr.Timeout() {
-				continue
-			}
-			break
-		}
+		}()
 	}
+
+	var (
+		byHostMu sync.Mutex
+		byHost   = make(map[string]DiscoveredCamera)
+		readWG   sync.WaitGroup
+	)
+	for _, s := range sockets {
+		readWG.Add(1)
+		go func(c *net.UDPConn) {
+			defer readWG.Done()
+			buf := make([]byte, 16384)
+			for time.Now().Before(deadline) {
+				if ctx.Err() != nil {
+					return
+				}
+				rem := time.Until(deadline)
+				if rem > 250*time.Millisecond {
+					rem = 250 * time.Millisecond
+				}
+				_ = c.SetReadDeadline(time.Now().Add(rem))
+				n, remote, rErr := c.ReadFromUDP(buf)
+				if n > 0 {
+					if cam, ok := parseProbeMatch(buf[:n], remote.IP.String()); ok && cam.Host != "" {
+						byHostMu.Lock()
+						byHost[cam.Host] = cam
+						byHostMu.Unlock()
+					}
+				}
+				if rErr != nil {
+					var netErr net.Error
+					if errors.As(rErr, &netErr) && netErr.Timeout() {
+						continue
+					}
+					return
+				}
+			}
+		}(s.conn)
+	}
+	readWG.Wait()
 
 	results := make([]DiscoveredCamera, 0, len(byHost))
 	for _, c := range byHost {
@@ -267,7 +399,7 @@ func parseProbeMatch(data []byte, fallbackIP string) (DiscoveredCamera, bool) {
 					switch {
 					case strings.HasPrefix(decoded, "onvif://www.onvif.org/hardware/"):
 						cam.Hardware = strings.TrimPrefix(decoded, "onvif://www.onvif.org/hardware/")
-						if cam.Model == "" {
+						if cam.Model == "" && !strings.EqualFold(cam.Hardware, "MODEL") {
 							cam.Model = cam.Hardware
 						}
 					case strings.HasPrefix(decoded, "onvif://www.onvif.org/name/"):

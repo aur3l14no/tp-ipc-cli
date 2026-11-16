@@ -210,12 +210,19 @@ when omitted.
   `unactivated`) must have their initial admin password set once via the camera's
   built-in web page (`http://<camera-ip>/`) or the TP-LINK mobile app before
   `tp-ipc` can log in.
-- **Routed VLANs and port forwarding.** Plain `tp-ipc discover` uses L2 UDP
-  multicast (`239.255.255.250:3702`), which routers do not forward across
-  subnets—pass `--cidr 192.168.1.0/24` to scan a remote subnet over HTTP. When
-  accessing a camera through port forwarding, override ports as needed
-  (`--http-port`, `--rtsp-port`, `--onvif-port`); note that ONVIF `events` uses
-  the PullPoint `SubscriptionReference` URL returned by the camera.
+- **macOS Local Network permission (`connect: no route to host`).** On macOS
+  15+, if your terminal emulator or MCP host app lacks **System Settings →
+  Privacy & Security → Local Network** permission, the kernel blocks LAN sockets
+  with `EHOSTUNREACH` (`connect: no route to host`) even on the same Wi-Fi
+  subnet. Toggle Local Network on for that app (and re-toggle if a package
+  manager rebuilds the app bundle).
+- **Routed VLANs and port forwarding.** Plain `tp-ipc discover` probes every
+  active non-TUN IPv4 LAN interface via L2 UDP multicast/broadcast
+  (`239.255.255.250:3702`), which routers do not forward across subnets—pass
+  `--cidr 192.168.1.0/24` to scan a remote subnet over HTTP. When accessing a
+  camera through port forwarding, override ports as needed (`--http-port`,
+  `--rtsp-port`, `--onvif-port`); note that ONVIF `events` uses the PullPoint
+  `SubscriptionReference` URL returned by the camera.
 - **Person event watch (`watch-person` / `camera_person_alarm`).** Mainland
   `TL-IPC` firmware exposes motion and tamper events over ONVIF, not
   person-classified events. `watch-person` temporarily isolates silent

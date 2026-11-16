@@ -15,7 +15,7 @@ import (
 	"github.com/aur3l14no/tp-ipc-cli/internal/ipc"
 )
 
-const ServerVersion = "0.3.1"
+const ServerVersion = "0.3.2"
 
 type Server struct {
 	overrides config.Overrides
