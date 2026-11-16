@@ -107,3 +107,45 @@ func TestProfileNameValidationAndSanitization(t *testing.T) {
 		t.Fatalf("unexpected sanitized token %q", got)
 	}
 }
+
+func TestLoadForConfigureDoesNotLeakDefaultProfile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	// Save an existing default camera with custom ports, user, and password
+	_, err := Save(Settings{
+		Name:     "desk",
+		Host:     "192.168.1.50",
+		HTTPPort: 8080,
+		User:     "desk_admin",
+		Password: "desk_secret_password",
+	}, true)
+	if err != nil {
+		t.Fatalf("Save desk: %v", err)
+	}
+
+	// Adding a brand-new named profile ("door") must NOT inherit desk's password, user, or port
+	doorCfg, err := LoadForConfigure(Overrides{
+		Camera: "door",
+		Host:   "192.168.1.60",
+	})
+	if err != nil {
+		t.Fatalf("LoadForConfigure door: %v", err)
+	}
+	if doorCfg.Host != "192.168.1.60" || doorCfg.HTTPPort != 80 || doorCfg.User != "admin" || doorCfg.Password != "" {
+		t.Fatalf("LoadForConfigure leaked default profile settings into new profile: %+v", doorCfg)
+	}
+
+	// Indexed env var IPC_PASSWORD_DOOR should work even before "door" exists in config.json
+	t.Setenv("IPC_PASSWORD_DOOR", "door_env_pw")
+	doorWithEnv, err := LoadForConfigure(Overrides{
+		Camera: "door",
+		Host:   "https://192.168.1.60",
+	})
+	if err != nil {
+		t.Fatalf("LoadForConfigure door with env: %v", err)
+	}
+	if doorWithEnv.Scheme != "https" || doorWithEnv.HTTPPort != 443 || doorWithEnv.Password != "door_env_pw" {
+		t.Fatalf("unexpected door env/https settings: %+v", doorWithEnv)
+	}
+}

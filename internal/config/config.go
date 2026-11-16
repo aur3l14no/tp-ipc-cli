@@ -522,6 +522,161 @@ func Load(ov Overrides) (Settings, error) {
 	return normalizeSettings(s, s.Name, st.MediaDir, st.AudioDir), nil
 }
 
+// LoadForConfigure resolves initial settings for `tp-ipc configure` / `tp-ipc camera add`.
+// Unlike Load, adding a new named profile never inherits host, user, ports, or password
+// from an unrelated default camera, and re-configuring an existing profile requires
+// either an explicit password flag/env var or interactive password entry.
+func LoadForConfigure(ov Overrides) (Settings, error) {
+	st, err := LoadStore()
+	if err != nil {
+		// If config file already exists on disk and is unreadable/insecure, surface the error.
+		if path, pErr := ConfigPath(); pErr == nil {
+			if _, statErr := os.Lstat(path); statErr == nil {
+				return Settings{}, err
+			}
+		}
+		st = Store{Cameras: make(map[string]Settings)}
+	}
+
+	targetName := strings.TrimSpace(ov.Camera)
+	if targetName != "" {
+		if err := ValidateProfileName(targetName); err != nil {
+			return Settings{}, err
+		}
+	}
+
+	s := Settings{
+		Name:      targetName,
+		Scheme:    DefaultScheme,
+		HTTPPort:  DefaultHTTPPort,
+		RTSPPort:  DefaultRTSPPort,
+		ONVIFPort: DefaultONVIFPort,
+		User:      DefaultUser,
+		MediaDir:  st.MediaDir,
+		AudioDir:  st.AudioDir,
+	}
+
+	copyConnDefaults := func(saved Settings) {
+		savedNoPw := saved
+		savedNoPw.Password = ""
+		applySaved(&s, savedNoPw)
+	}
+
+	if targetName != "" {
+		if existing, ok := st.Cameras[targetName]; ok {
+			copyConnDefaults(existing)
+		}
+		if sfx := profileNameToEnvSuffix(targetName); sfx != "" {
+			if v := strings.TrimSpace(os.Getenv("IPC_HOST_" + sfx)); v != "" {
+				if err := applyHost(&s, v); err != nil {
+					return s, err
+				}
+			}
+			if v := strings.TrimSpace(os.Getenv("IPC_USER_" + sfx)); v != "" {
+				s.User = v
+			}
+			if v := os.Getenv("IPC_PASSWORD_" + sfx); v != "" {
+				s.Password = v
+			}
+			if v := strings.TrimSpace(os.Getenv("IPC_PASSWORD_FILE_" + sfx)); v != "" {
+				pw, err := readFirstLineFile(v)
+				if err != nil {
+					return s, err
+				}
+				s.Password = pw
+			}
+			if err := applyEnvPort("IPC_HTTP_PORT_"+sfx, &s.HTTPPort); err != nil {
+				return s, err
+			}
+			if err := applyEnvPort("IPC_RTSP_PORT_"+sfx, &s.RTSPPort); err != nil {
+				return s, err
+			}
+			if err := applyEnvPort("IPC_ONVIF_PORT_"+sfx, &s.ONVIFPort); err != nil {
+				return s, err
+			}
+		}
+	} else {
+		if defEnv := strings.TrimSpace(os.Getenv("IPC_CAMERA")); defEnv != "" {
+			if existing, ok := st.Cameras[defEnv]; ok {
+				copyConnDefaults(existing)
+				s.Name = defEnv
+			}
+		} else if st.DefaultCamera != "" {
+			if existing, ok := st.Cameras[st.DefaultCamera]; ok {
+				copyConnDefaults(existing)
+			}
+		}
+	}
+
+	if targetName == "" || s.Host == "" {
+		if v := strings.TrimSpace(os.Getenv("IPC_HOST")); v != "" {
+			if err := applyHost(&s, v); err != nil {
+				return s, err
+			}
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("IPC_USER")); v != "" && (targetName == "" || s.User == "" || s.User == DefaultUser) {
+		s.User = v
+	}
+	if v := os.Getenv("IPC_PASSWORD"); v != "" && s.Password == "" {
+		s.Password = v
+	}
+	if v := strings.TrimSpace(os.Getenv("IPC_PASSWORD_FILE")); v != "" && s.Password == "" {
+		pw, err := readFirstLineFile(v)
+		if err != nil {
+			return s, err
+		}
+		s.Password = pw
+	}
+	if err := applyEnvPort("IPC_HTTP_PORT", &s.HTTPPort); err != nil {
+		return s, err
+	}
+	if err := applyEnvPort("IPC_RTSP_PORT", &s.RTSPPort); err != nil {
+		return s, err
+	}
+	if err := applyEnvPort("IPC_ONVIF_PORT", &s.ONVIFPort); err != nil {
+		return s, err
+	}
+
+	if strings.TrimSpace(ov.Host) != "" {
+		if err := applyHost(&s, ov.Host); err != nil {
+			return s, err
+		}
+	}
+	if strings.TrimSpace(ov.User) != "" {
+		s.User = strings.TrimSpace(ov.User)
+	}
+	if ov.HTTPPort > 0 {
+		s.HTTPPort = ov.HTTPPort
+	}
+	if ov.RTSPPort > 0 {
+		s.RTSPPort = ov.RTSPPort
+	}
+	if ov.ONVIFPort > 0 {
+		s.ONVIFPort = ov.ONVIFPort
+	}
+	if strings.TrimSpace(ov.PasswordFile) != "" {
+		pw, err := readFirstLineFile(ov.PasswordFile)
+		if err != nil {
+			return s, err
+		}
+		s.Password = pw
+	}
+	if ov.PasswordStdin {
+		in := ov.Stdin
+		if in == nil {
+			in = os.Stdin
+		}
+		pw, err := readLine(in)
+		if err != nil {
+			return s, fmt.Errorf("reading password from stdin: %w", err)
+		}
+		s.Password = pw
+	}
+
+	return normalizeSettings(s, s.Name, st.MediaDir, st.AudioDir), nil
+}
+
 // SaveStore writes the multi-camera Store atomically with 0600 permissions.
 func SaveStore(st Store) (string, error) {
 	for k := range st.Cameras {
@@ -710,6 +865,10 @@ func applyHost(dst *Settings, raw string) error {
 	dst.Host = host
 	if port > 0 {
 		dst.HTTPPort = port
+	} else if scheme == "https" && dst.HTTPPort == DefaultHTTPPort {
+		dst.HTTPPort = 443
+	} else if scheme == "http" && dst.HTTPPort == 443 {
+		dst.HTTPPort = DefaultHTTPPort
 	}
 	return nil
 }

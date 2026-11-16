@@ -38,12 +38,16 @@ make dist             # Cross-compile darwin/{arm64,amd64} & linux/{arm64,amd64}
 Mainland China TP-LINK `TL-IPC` firmware differs from international Tapo
 firmware in several subtle ways that the codebase handles directly:
 
-- **RSA public key encoding (`internal/ipc/auth.go`).** The unauthenticated
-  login challenge returns an URL-encoded base64 DER `SubjectPublicKeyInfo` whose
-  2048-bit modulus omits the leading `0x00` sign byte required by strict ASN.1
-  DER parsers. `parseLooseRSAPublicKey` reconstructs the modulus and exponent
-  without failing on non-canonical integer padding, then encrypts in 245-byte
-  PKCS#1 v1.5 blocks.
+- **RSA & MD5 challenge-response (`internal/ipc/auth.go`, `internal/ipc/client.go`).**
+  The unauthenticated `/pc/Content.htm` challenge returns an URL-encoded base64
+  DER `SubjectPublicKeyInfo` whose modulus may omit the leading `0x00` sign byte
+  required by strict ASN.1 DER parsers; `ParseCameraRSAPublicKey` reconstructs
+  the modulus and exponent without failing on non-canonical integer padding and
+  encrypts `<securityEncode(pw)>:<nonce>` via PKCS#1 v1.5 (`encrypt_type: "2"`).
+  Older or entry-level mainland `TL-IPC` firmware additionally advertises
+  `"md5_encrypt_type": 1` in the challenge JSON, requiring `password` to be
+  `md5("<raw_pw>:<nonce>")` alongside `"md5_encrypt_type": "1"` in the login
+  payload instead of the RSA ciphertext.
 - **Session concurrency (`internal/ipc/client.go`).** Login serialization uses a
   dedicated `loginMu` separate from `stateMu` so transport error redaction never
   re-enters a held mutex.

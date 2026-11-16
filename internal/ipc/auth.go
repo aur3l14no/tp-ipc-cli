@@ -1,9 +1,11 @@
 package ipc
 
 import (
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -181,4 +183,15 @@ func EncryptLoginPassword(password, nonce, encodedKey string) (string, error) {
 		return "", fmt.Errorf("RSA PKCS#1 v1.5 encrypt failed: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// MD5LoginPassword hashes "<raw_password>:<nonce>" as lowercase MD5 hex for
+// TL-IPC firmware challenges that advertise md5_encrypt_type == 1.
+func MD5LoginPassword(password, nonce string) (string, error) {
+	if !utf8.ValidString(password) {
+		return "", errors.New("password is not valid UTF-8")
+	}
+	normalized := strings.ReplaceAll(password+":"+nonce, "\r\n", "\n")
+	sum := md5.Sum([]byte(normalized))
+	return hex.EncodeToString(sum[:]), nil
 }

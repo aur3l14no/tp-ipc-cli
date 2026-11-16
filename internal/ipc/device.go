@@ -153,7 +153,7 @@ func (c *Client) ActivationStatus(ctx context.Context) (ActivationState, error) 
 			Username: "admin",
 			Code:     code,
 		}, nil
-	case ErrCodeActivated:
+	case ErrCodeActivated, ErrCodeLocked, ErrCodeClientFull, ErrCodeLockedForever:
 		return ActivationState{
 			State:                 "activated",
 			Username:              "admin",
