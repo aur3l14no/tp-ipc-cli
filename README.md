@@ -206,36 +206,22 @@ when omitted.
 
 ## Caveats
 
-- **First-time activation.** Unactivated cameras (`activation` reports
-  `unactivated`) must have their initial admin password set once via the camera's
-  built-in web page (`http://<camera-ip>/`) or the TP-LINK mobile app before
-  `tp-ipc` can log in.
-- **macOS Local Network permission (`connect: no route to host`).** On macOS
-  15+, if your terminal emulator or MCP host app lacks **System Settings →
-  Privacy & Security → Local Network** permission, the kernel blocks LAN sockets
-  with `EHOSTUNREACH` (`connect: no route to host`) even on the same Wi-Fi
-  subnet. Toggle Local Network on for that app (and re-toggle if a package
-  manager rebuilds the app bundle).
-- **Routed VLANs and port forwarding.** Plain `tp-ipc discover` probes every
-  active non-TUN IPv4 LAN interface via L2 UDP multicast/broadcast
-  (`239.255.255.250:3702`), which routers do not forward across subnets—pass
-  `--cidr 192.168.1.0/24` to scan a remote subnet over HTTP. When accessing a
-  camera through port forwarding, override ports as needed (`--http-port`,
-  `--rtsp-port`, `--onvif-port`); note that ONVIF `events` uses the PullPoint
-  `SubscriptionReference` URL returned by the camera.
-- **Person event watch (`watch-person` / `camera_person_alarm`).** Mainland
-  `TL-IPC` firmware exposes motion and tamper events over ONVIF, not
-  person-classified events. `watch-person` temporarily isolates silent
-  white-light linkage for person detection and restores your previous settings
-  when done; avoid running concurrent settings changes during that window.
-- **Single SD playback stream per camera.** Firmware serves one `MULTITRANS`
-  SD playback session at a time on port `554`; run historical `export` jobs
-  sequentially per camera.
+- **First-time activation.** Set the camera's initial admin password once via
+  its built-in web UI (`http://<camera-ip>/`) or the TP-LINK app before using
+  `tp-ipc`.
+- **One SD playback stream per camera.** Firmware serves a single SD card
+  playback session at a time; run `export` jobs sequentially per camera.
 
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for building from source, running tests,
 cross-compiling release binaries, and mainland `TL-IPC` protocol notes.
+
+## Disclaimer
+
+`tp-ipc` is an independent open-source interoperability tool and is not
+affiliated with, endorsed by, or sponsored by TP-LINK. Use it only on cameras
+and networks you own or have explicit authorization to manage.
 
 ## License
 
