@@ -44,10 +44,10 @@ firmware in several subtle ways that the codebase handles directly:
   required by strict ASN.1 DER parsers; `ParseCameraRSAPublicKey` reconstructs
   the modulus and exponent without failing on non-canonical integer padding and
   encrypts `<securityEncode(pw)>:<nonce>` via PKCS#1 v1.5 (`encrypt_type: "2"`).
-  Older or entry-level mainland `TL-IPC` firmware additionally advertises
-  `"md5_encrypt_type": 1` in the challenge JSON, requiring `password` to be
-  `md5("<raw_pw>:<nonce>")` alongside `"md5_encrypt_type": "1"` in the login
-  payload instead of the RSA ciphertext.
+  Earlier hardware revisions (such as `TL-IPC48AW-PLUS 2.0` vs `5.0`)
+  additionally advertise `"md5_encrypt_type": 1` in the challenge JSON,
+  requiring `password` to be `md5("<raw_pw>:<nonce>")` alongside
+  `"md5_encrypt_type": "1"` in the login payload instead of the RSA ciphertext.
 - **Session concurrency (`internal/ipc/client.go`).** Login serialization uses a
   dedicated `loginMu` separate from `stateMu` so transport error redaction never
   re-enters a held mutex.
