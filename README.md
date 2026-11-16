@@ -204,6 +204,15 @@ when omitted.
 | Controls & alarms | `camera_set_privacy`, `camera_set_led`, `camera_set_speaker_volume`, `camera_set_tracking`, `camera_set_detection`, `camera_set_night_vision`, `camera_alarm`, `camera_stop_alarm` |
 | Events | `camera_events`, `camera_person_alarm` |
 
+## Tested Hardware
+
+| Model | Hardware | Firmware | Login Handshake |
+| --- | --- | --- | --- |
+| `TL-IPC48AW-PLUS` | `5.0` | `1.0.3 Build 260119 Rel.38255n` | RSA PKCS#1 v1.5 (`encrypt_type: "2"`) |
+| `TL-IPC48AW-PLUS` | `2.0` | `1.0.4 Build 240702 Rel.67033n` | MD5 challenge-response (`md5_encrypt_type: 1`) |
+
+Other mainland China `TL-IPC` models and hardware revisions sharing the `/stok=<token>/ds`, ONVIF `:2020`, and RTSP/`MULTITRANS` `:554` stack should also work.
+
 ## Caveats
 
 - **First-time activation.** Set the camera's initial admin password once via
