@@ -761,11 +761,10 @@ func (c *Client) streamSinglePlaybackChunk(
 ) (float64, avStreamConfig, error) {
 	var avCfg avStreamConfig
 
-	dialer := net.Dialer{Timeout: 8 * time.Second}
 	rtspAddr := net.JoinHostPort(c.cfg.Host, strconv.Itoa(c.cfg.RTSPPort))
-	conn, err := dialer.DialContext(ctx, "tcp", rtspAddr)
+	conn, err := c.dialWithTimeout(ctx, "tcp", rtspAddr, 10*time.Second)
 	if err != nil {
-		return 0, avCfg, fmt.Errorf("connect RTSP MULTITRANS (%s): %w", rtspAddr, err)
+		return 0, avCfg, fmt.Errorf("connect RTSP MULTITRANS (%s): %s", rtspAddr, c.Redact(err.Error()))
 	}
 	defer conn.Close()
 	stopCancelClose := context.AfterFunc(ctx, func() {

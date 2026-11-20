@@ -34,8 +34,8 @@ type Settings struct {
 	ONVIFPort int    `json:"onvif_port,omitempty"`
 	User      string `json:"user"`
 	Password  string `json:"password,omitempty"`
+	Proxy     string `json:"proxy,omitempty"`
 	MediaDir  string `json:"media_dir,omitempty"`
-	AudioDir  string `json:"audio_dir,omitempty"`
 }
 
 // Store represents the multi-camera configuration file (~/.config/tp-ipc/config.json).
@@ -43,7 +43,6 @@ type Settings struct {
 type Store struct {
 	DefaultCamera string              `json:"default_camera,omitempty"`
 	MediaDir      string              `json:"media_dir,omitempty"`
-	AudioDir      string              `json:"audio_dir,omitempty"`
 	Cameras       map[string]Settings `json:"cameras,omitempty"`
 
 	// Legacy flat single-camera fields (migrated into Cameras["default"] on load)
@@ -54,6 +53,7 @@ type Store struct {
 	ONVIFPort int    `json:"onvif_port,omitempty"`
 	User      string `json:"user,omitempty"`
 	Password  string `json:"password,omitempty"`
+	Proxy     string `json:"proxy,omitempty"`
 }
 
 type Overrides struct {
@@ -65,20 +65,22 @@ type Overrides struct {
 	HTTPPort      int
 	RTSPPort      int
 	ONVIFPort     int
+	Proxy         string
 	Stdin         io.Reader
 }
 
 type CameraSummary struct {
-	Name          string `json:"name"`
-	Default       bool   `json:"default"`
-	Scheme        string `json:"scheme"`
-	Host          string `json:"host"`
-	HTTPPort      int    `json:"http_port"`
-	RTSPPort      int    `json:"rtsp_port"`
-	ONVIFPort     int    `json:"onvif_port"`
-	User          string `json:"user"`
-	HasPassword   bool   `json:"has_password"`
-	Source        string `json:"source,omitempty"`
+	Name        string `json:"name"`
+	Default     bool   `json:"default"`
+	Scheme      string `json:"scheme"`
+	Host        string `json:"host"`
+	HTTPPort    int    `json:"http_port"`
+	RTSPPort    int    `json:"rtsp_port"`
+	ONVIFPort   int    `json:"onvif_port"`
+	User        string `json:"user"`
+	HasPassword bool   `json:"has_password"`
+	Proxy       string `json:"proxy,omitempty"`
+	Source      string `json:"source,omitempty"`
 }
 
 func ConfigPath() (string, error) {
@@ -166,7 +168,7 @@ func ParseHostInput(raw string) (scheme string, host string, port int, err error
 	return u.Scheme, hostname, port, nil
 }
 
-func normalizeSettings(s Settings, name string, globalMediaDir, globalAudioDir string) Settings {
+func normalizeSettings(s Settings, name string, globalMediaDir string) Settings {
 	s.Name = name
 	if s.Host != "" {
 		if scheme, host, port, err := ParseHostInput(s.Host); err == nil {
@@ -201,8 +203,10 @@ func normalizeSettings(s Settings, name string, globalMediaDir, globalAudioDir s
 	if s.MediaDir == "" {
 		s.MediaDir = globalMediaDir
 	}
-	if s.AudioDir == "" {
-		s.AudioDir = globalAudioDir
+	if s.Proxy != "" {
+		if spec, err := ParseProxyInput(s.Proxy); err == nil {
+			s.Proxy = spec.Canonical()
+		}
 	}
 	return s
 }
@@ -244,11 +248,12 @@ func LoadStore() (Store, error) {
 					ONVIFPort: st.ONVIFPort,
 					User:      st.User,
 					Password:  st.Password,
+					Proxy:     st.Proxy,
 				}
 				if st.DefaultCamera == "" {
 					st.DefaultCamera = "default"
 				}
-				st.Scheme, st.Host, st.User, st.Password = "", "", "", ""
+				st.Scheme, st.Host, st.User, st.Password, st.Proxy = "", "", "", "", ""
 				st.HTTPPort, st.RTSPPort, st.ONVIFPort = 0, 0, 0
 			}
 		}
@@ -256,9 +261,6 @@ func LoadStore() (Store, error) {
 
 	if v := strings.TrimSpace(os.Getenv("IPC_MEDIA_DIR")); v != "" {
 		st.MediaDir = v
-	}
-	if v := strings.TrimSpace(os.Getenv("IPC_AUDIO_DIR")); v != "" {
-		st.AudioDir = v
 	}
 
 	// Merge IPC_CAMERAS JSON map if provided: e.g. '{"desk":{"host":"192.168.1.60"},"door":{"host":"192.168.1.61"}}'
@@ -304,7 +306,14 @@ func LoadStore() (Store, error) {
 		if err := ValidateProfileName(k); err != nil {
 			return st, err
 		}
-		st.Cameras[k] = normalizeSettings(v, k, st.MediaDir, st.AudioDir)
+		if strings.TrimSpace(v.Proxy) != "" {
+			spec, pErr := ParseProxyInput(v.Proxy)
+			if pErr != nil {
+				return st, fmt.Errorf("camera %q: %w", k, pErr)
+			}
+			v.Proxy = spec.Canonical()
+		}
+		st.Cameras[k] = normalizeSettings(v, k, st.MediaDir)
 	}
 	return st, nil
 }
@@ -364,6 +373,16 @@ func applyIndexedEnvVars(st *Store) {
 		_ = applyEnvPort("IPC_HTTP_PORT_"+sfx, &cam.HTTPPort)
 		_ = applyEnvPort("IPC_RTSP_PORT_"+sfx, &cam.RTSPPort)
 		_ = applyEnvPort("IPC_ONVIF_PORT_"+sfx, &cam.ONVIFPort)
+		if v := strings.TrimSpace(os.Getenv("IPC_SSH_" + sfx)); v != "" {
+			if err := applyProxy(&cam, EnsureSSHProxyPrefix(v)); err != nil {
+				cam.Proxy = EnsureSSHProxyPrefix(v)
+			}
+		}
+		if v := strings.TrimSpace(os.Getenv("IPC_PROXY_" + sfx)); v != "" {
+			if err := applyProxy(&cam, v); err != nil {
+				cam.Proxy = v
+			}
+		}
 		st.Cameras[name] = cam
 	}
 }
@@ -396,6 +415,7 @@ func (st Store) Summaries() []CameraSummary {
 			ONVIFPort:   c.ONVIFPort,
 			User:        c.User,
 			HasPassword: c.Password != "",
+			Proxy:       c.RedactedProxy(),
 		})
 	}
 	return out
@@ -420,7 +440,6 @@ func Load(ov Overrides) (Settings, error) {
 		ONVIFPort: DefaultONVIFPort,
 		User:      DefaultUser,
 		MediaDir:  st.MediaDir,
-		AudioDir:  st.AudioDir,
 	}
 
 	if targetName != "" {
@@ -440,8 +459,11 @@ func Load(ov Overrides) (Settings, error) {
 		s.Name = targetName
 	} else if st.DefaultCamera != "" {
 		if cam, ok := st.Cameras[st.DefaultCamera]; ok {
-			applySaved(&s, cam)
-			s.Name = st.DefaultCamera
+			_, ovHost, _, _ := ParseHostInput(ov.Host)
+			if ovHost == "" || strings.EqualFold(ovHost, cam.Host) {
+				applySaved(&s, cam)
+				s.Name = st.DefaultCamera
+			}
 		}
 	} else if len(st.Cameras) > 1 && strings.TrimSpace(ov.Host) == "" && strings.TrimSpace(os.Getenv("IPC_HOST")) == "" {
 		names := make([]string, 0, len(st.Cameras))
@@ -482,6 +504,16 @@ func Load(ov Overrides) (Settings, error) {
 	if err := applyEnvPort("IPC_ONVIF_PORT", &s.ONVIFPort); err != nil {
 		return s, err
 	}
+	if v := strings.TrimSpace(os.Getenv("IPC_SSH")); v != "" && (targetName == "" || s.Proxy == "") {
+		if err := applyProxy(&s, EnsureSSHProxyPrefix(v)); err != nil {
+			return s, err
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("IPC_PROXY")); v != "" && (targetName == "" || s.Proxy == "") {
+		if err := applyProxy(&s, v); err != nil {
+			return s, err
+		}
+	}
 
 	if strings.TrimSpace(ov.Host) != "" {
 		if err := applyHost(&s, ov.Host); err != nil {
@@ -499,6 +531,11 @@ func Load(ov Overrides) (Settings, error) {
 	}
 	if ov.ONVIFPort > 0 {
 		s.ONVIFPort = ov.ONVIFPort
+	}
+	if strings.TrimSpace(ov.Proxy) != "" {
+		if err := applyProxy(&s, ov.Proxy); err != nil {
+			return s, err
+		}
 	}
 	if strings.TrimSpace(ov.PasswordFile) != "" {
 		pw, err := readFirstLineFile(ov.PasswordFile)
@@ -519,7 +556,7 @@ func Load(ov Overrides) (Settings, error) {
 		s.Password = pw
 	}
 
-	return normalizeSettings(s, s.Name, st.MediaDir, st.AudioDir), nil
+	return normalizeSettings(s, s.Name, st.MediaDir), nil
 }
 
 // LoadForConfigure resolves initial settings for `tp-ipc configure` / `tp-ipc camera add`.
@@ -553,7 +590,6 @@ func LoadForConfigure(ov Overrides) (Settings, error) {
 		ONVIFPort: DefaultONVIFPort,
 		User:      DefaultUser,
 		MediaDir:  st.MediaDir,
-		AudioDir:  st.AudioDir,
 	}
 
 	copyConnDefaults := func(saved Settings) {
@@ -593,6 +629,16 @@ func LoadForConfigure(ov Overrides) (Settings, error) {
 			}
 			if err := applyEnvPort("IPC_ONVIF_PORT_"+sfx, &s.ONVIFPort); err != nil {
 				return s, err
+			}
+			if v := strings.TrimSpace(os.Getenv("IPC_SSH_" + sfx)); v != "" {
+				if err := applyProxy(&s, EnsureSSHProxyPrefix(v)); err != nil {
+					return s, err
+				}
+			}
+			if v := strings.TrimSpace(os.Getenv("IPC_PROXY_" + sfx)); v != "" {
+				if err := applyProxy(&s, v); err != nil {
+					return s, err
+				}
 			}
 		}
 	} else {
@@ -637,6 +683,16 @@ func LoadForConfigure(ov Overrides) (Settings, error) {
 	if err := applyEnvPort("IPC_ONVIF_PORT", &s.ONVIFPort); err != nil {
 		return s, err
 	}
+	if v := strings.TrimSpace(os.Getenv("IPC_SSH")); v != "" && (targetName == "" || s.Proxy == "") {
+		if err := applyProxy(&s, EnsureSSHProxyPrefix(v)); err != nil {
+			return s, err
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("IPC_PROXY")); v != "" && (targetName == "" || s.Proxy == "") {
+		if err := applyProxy(&s, v); err != nil {
+			return s, err
+		}
+	}
 
 	if strings.TrimSpace(ov.Host) != "" {
 		if err := applyHost(&s, ov.Host); err != nil {
@@ -654,6 +710,11 @@ func LoadForConfigure(ov Overrides) (Settings, error) {
 	}
 	if ov.ONVIFPort > 0 {
 		s.ONVIFPort = ov.ONVIFPort
+	}
+	if strings.TrimSpace(ov.Proxy) != "" {
+		if err := applyProxy(&s, ov.Proxy); err != nil {
+			return s, err
+		}
 	}
 	if strings.TrimSpace(ov.PasswordFile) != "" {
 		pw, err := readFirstLineFile(ov.PasswordFile)
@@ -674,7 +735,7 @@ func LoadForConfigure(ov Overrides) (Settings, error) {
 		s.Password = pw
 	}
 
-	return normalizeSettings(s, s.Name, st.MediaDir, st.AudioDir), nil
+	return normalizeSettings(s, s.Name, st.MediaDir), nil
 }
 
 // SaveStore writes the multi-camera Store atomically with 0600 permissions.
@@ -700,7 +761,7 @@ func SaveStore(st Store) (string, error) {
 	_ = os.Chmod(dir, 0o700)
 
 	// Clear legacy flat fields before persisting
-	st.Scheme, st.Host, st.User, st.Password = "", "", "", ""
+	st.Scheme, st.Host, st.User, st.Password, st.Proxy = "", "", "", "", ""
 	st.HTTPPort, st.RTSPPort, st.ONVIFPort = 0, 0, 0
 
 	tmp, err := os.CreateTemp(dir, ".config-*.json")
@@ -812,6 +873,14 @@ func (s Settings) Redact(text string, extraSecrets ...string) string {
 			base64.StdEncoding.EncodeToString([]byte(s.User+":"+s.Password)),
 		)
 	}
+	if pSpec, err := ParseProxyInput(s.Proxy); err == nil && pSpec.Password != "" {
+		candidates = append(candidates,
+			pSpec.Password,
+			url.QueryEscape(pSpec.Password),
+			url.PathEscape(pSpec.Password),
+			base64.StdEncoding.EncodeToString([]byte(pSpec.User+":"+pSpec.Password)),
+		)
+	}
 	for _, ex := range extraSecrets {
 		if ex != "" {
 			candidates = append(candidates, ex, url.QueryEscape(ex), url.PathEscape(ex))
@@ -848,12 +917,29 @@ func applySaved(dst *Settings, saved Settings) {
 	if saved.Password != "" {
 		dst.Password = saved.Password
 	}
+	if saved.Proxy != "" {
+		if err := applyProxy(dst, saved.Proxy); err != nil {
+			dst.Proxy = saved.Proxy
+		}
+	}
 	if saved.MediaDir != "" {
 		dst.MediaDir = saved.MediaDir
 	}
-	if saved.AudioDir != "" {
-		dst.AudioDir = saved.AudioDir
+}
+
+func applyProxy(dst *Settings, raw string) error {
+	spec, err := ParseProxyInput(raw)
+	if err != nil {
+		return err
 	}
+	if spec.DirectOverride {
+		dst.Proxy = ""
+		return nil
+	}
+	if spec.Kind != "" {
+		dst.Proxy = spec.Canonical()
+	}
+	return nil
 }
 
 func applyHost(dst *Settings, raw string) error {

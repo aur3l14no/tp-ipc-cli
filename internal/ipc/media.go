@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -73,7 +72,10 @@ func (c *Client) Snapshot(ctx context.Context, opts SnapshotOptions) ([]byte, er
 	if opts.HighQuality || opts.Zoom > 1 {
 		stream = "stream1"
 	}
-	rtspURL := c.cfg.RTSPURL(stream, false)
+	rtspURL, err := c.RTSPStreamURL(ctx, stream)
+	if err != nil {
+		return nil, err
+	}
 
 	args := []string{
 		"-nostdin",
@@ -167,7 +169,10 @@ func (c *Client) RecordClip(ctx context.Context, seconds int, highQuality bool, 
 		stream = "stream1"
 		qualityLabel = "main"
 	}
-	rtspURL := c.cfg.RTSPURL(stream, false)
+	rtspURL, err := c.RTSPStreamURL(ctx, stream)
+	if err != nil {
+		return RecordResult{}, err
+	}
 
 	ext := strings.ToLower(filepath.Ext(targetPath))
 	if ext == "" {
@@ -236,38 +241,6 @@ func uniquePartialPath(targetPath, ext string) string {
 	)
 }
 
-var safeBasenameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$`)
-
-// PlayAudioFromDir validates that filename is a safe audio file inside audioDir and plays it over RTSP MULTITRANS.
-func (c *Client) PlayAudioFromDir(ctx context.Context, audioDir, filename string) (TalkResult, error) {
-	if !safeBasenameRe.MatchString(filename) {
-		return TalkResult{}, errors.New("audio filename must be a simple basename (letters, digits, '_', '-', '.')")
-	}
-	dir := strings.TrimSpace(audioDir)
-	if dir == "" {
-		dir = strings.TrimSpace(c.cfg.AudioDir)
-	}
-	if dir == "" {
-		return TalkResult{}, errors.New("IPC_AUDIO_DIR is not configured")
-	}
-	realDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return TalkResult{}, fmt.Errorf("cannot resolve IPC_AUDIO_DIR: %w", err)
-	}
-	dirInfo, err := os.Stat(realDir)
-	if err != nil || !dirInfo.IsDir() {
-		return TalkResult{}, errors.New("IPC_AUDIO_DIR must be an existing directory")
-	}
-	realFile, err := filepath.EvalSymlinks(filepath.Join(realDir, filename))
-	if err != nil {
-		return TalkResult{}, fmt.Errorf("audio file not found in IPC_AUDIO_DIR: %w", err)
-	}
-	if filepath.Dir(realFile) != realDir {
-		return TalkResult{}, errors.New("audio file escapes IPC_AUDIO_DIR")
-	}
-	return c.PlayAudioFile(ctx, realFile)
-}
-
 // PlayAudioFile streams a local audio file (.wav, .mp3, .m4a, .ogg, .aac, .flac) through the camera speaker via RTSP MULTITRANS.
 func (c *Client) PlayAudioFile(ctx context.Context, filePath string) (TalkResult, error) {
 	if c.cfg.User == "" || c.cfg.Password == "" {
@@ -291,11 +264,10 @@ func (c *Client) PlayAudioFile(ctx context.Context, filePath string) (TalkResult
 		return TalkResult{}, fmt.Errorf("unsupported audio extension %q", filepath.Ext(filePath))
 	}
 
-	dialer := net.Dialer{Timeout: 6 * time.Second}
 	rtspAddr := net.JoinHostPort(c.cfg.Host, strconv.Itoa(c.cfg.RTSPPort))
-	conn, err := dialer.DialContext(ctx, "tcp", rtspAddr)
+	conn, err := c.dialWithTimeout(ctx, "tcp", rtspAddr, 10*time.Second)
 	if err != nil {
-		return TalkResult{}, fmt.Errorf("connect camera RTSP talkback (%s): %w", rtspAddr, err)
+		return TalkResult{}, fmt.Errorf("connect camera RTSP talkback (%s): %s", rtspAddr, c.Redact(err.Error()))
 	}
 	defer conn.Close()
 

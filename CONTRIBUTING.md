@@ -23,15 +23,16 @@ make dist             # Cross-compile darwin/{arm64,amd64} & linux/{arm64,amd64}
 | Path | Responsibility |
 | --- | --- |
 | `cmd/tp-ipc/main.go` | CLI flag parsing, subcommand dispatch, human & `--json` output |
-| `internal/config/` | Multi-camera store (`~/.config/tp-ipc/config.json`, `0600`), environment variable overlays, profile validation |
+| `internal/config/` | Multi-camera store (`~/.config/tp-ipc/config.json`, `0600`), environment variable overlays, profile and proxy validation |
 | `internal/ipc/auth.go` | Unauthenticated `/pc/Content.htm` activation probe and RSA PKCS#1 v1.5 `/ds` challenge-response cipher |
 | `internal/ipc/client.go` | Session lifecycle, `stok` token renewal, credential redaction |
+| `internal/ipc/proxy.go` | Shared OpenSSH `-D` dynamic tunnel pool, SOCKS5 / HTTP CONNECT dialers, and local RTSP loopback bridge |
 | `internal/ipc/device.go` | `/stok=<token>/ds` JSON API wrappers (status, detectors, night vision, LED, speaker, presets, SD index) |
 | `internal/ipc/discover.go` | ONVIF WS-Discovery UDP multicast (`239.255.255.250:3702`) and `/22`–`/32` HTTP CIDR scan |
 | `internal/ipc/onvif.go` | ONVIF Profile S/T WS-Security `PasswordDigest` PTZ control and PullPoint event subscriptions |
 | `internal/ipc/media.go` | RTSP single-frame JPEG capture (`stream1`/`stream2` + digital crop), lossless clip muxing, `MULTITRANS` G.711 A-law speaker talkback |
 | `internal/ipc/playback.go` | Historical SD card time-range export over RTSP `MULTITRANS` (`playback`) + RTP-over-TCP demuxing into lossless `.mp4`/`.mkv` |
-| `internal/mcp/server.go` | MCP `stdio` JSON-RPC 2.0 server (`2024-11-05` through `2025-11-25`) caching per-camera clients |
+| `internal/live/` | Local authenticated web live console (fMP4 MSE stream hub, PTZ/preset/device controls) and native RTSP player launcher |
 
 ## Mainland `TL-IPC` Protocol Notes
 
@@ -66,8 +67,7 @@ firmware in several subtle ways that the codebase handles directly:
 
 ## Releasing
 
-1. Update `ServerVersion` in `internal/mcp/server.go` and `VERSION` in
-   `Makefile`.
+1. Update `version` in `cmd/tp-ipc/main.go` and `VERSION` in `Makefile`.
 2. Run `go vet ./... && make test && make VERSION=<x.y.z> dist`.
 3. Commit, tag `v<x.y.z>`, push to `main`, and publish a GitHub Release with the
    files in `dist/` (`tp-ipc-darwin-arm64`, `tp-ipc-darwin-amd64`,

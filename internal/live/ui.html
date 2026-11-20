@@ -1,0 +1,1175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tp-ipc live</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #121722;
+    --panel-2: #181f2e;
+    --border: #252f42;
+    --text: #e6edf3;
+    --muted: #8b98ad;
+    --primary: #3b82f6;
+    --primary-hover: #2563eb;
+    --success: #10b981;
+    --warning: #f59e0b;
+    --danger: #ef4444;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .app {
+    display: grid;
+    grid-template-rows: 52px 1fr;
+    height: 100vh;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background 0.2s, box-shadow 0.2s;
+  }
+  .dot.live {
+    background: var(--success);
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.7);
+  }
+  .dot.masked { background: var(--warning); }
+  .dot.error { background: var(--danger); }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  select, input[type="text"] {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 6px 10px;
+    font-size: 13px;
+    outline: none;
+  }
+  select:focus, input[type="text"]:focus { border-color: var(--primary); }
+
+  .seg {
+    display: inline-flex;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 2px;
+  }
+  .seg button {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    padding: 4px 10px;
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .seg button.active {
+    background: var(--panel-2);
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 6px 11px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    user-select: none;
+  }
+  .btn:hover:not(:disabled) { border-color: #3a4966; background: #1f283b; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
+  .btn.danger { background: rgba(239, 68, 68, 0.14); border-color: rgba(239, 68, 68, 0.4); color: #fca5a5; }
+  .btn.danger:hover:not(:disabled) { background: rgba(239, 68, 68, 0.25); }
+  .btn.warn { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.4); color: #fcd34d; }
+
+  .badge {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    padding: 3px 7px;
+    border-radius: 5px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+
+  main {
+    display: grid;
+    grid-template-columns: 1fr 330px;
+    min-height: 0;
+  }
+  @media (max-width: 920px) {
+    .app { height: auto; min-height: 100vh; }
+    main { grid-template-columns: 1fr; }
+    .stage { min-height: 56vw; }
+  }
+
+  .stage {
+    position: relative;
+    background: #05070a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    min-height: 0;
+  }
+  video {
+    width: 100%;
+    height: 100%;
+    max-height: calc(100vh - 52px);
+    object-fit: contain;
+    background: #000;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(8, 11, 16, 0.82);
+    backdrop-filter: blur(4px);
+    padding: 20px;
+    z-index: 5;
+  }
+  .overlay[hidden] { display: none; }
+  .overlay-card {
+    max-width: 380px;
+    text-align: center;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 24px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  }
+  .overlay-card h2 { margin: 0 0 8px; font-size: 16px; }
+  .overlay-card p { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+  .overlay-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+
+  aside {
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+  }
+  .card-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  /* PTZ D-Pad */
+  .dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 46px);
+    grid-template-rows: repeat(3, 40px);
+    gap: 6px;
+    justify-content: center;
+    margin: 6px 0 10px;
+  }
+  .dpad button {
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.08s, background 0.12s, border-color 0.12s;
+  }
+  .dpad button:hover:not(:disabled) { border-color: var(--primary); background: #1e293b; }
+  .dpad button:active:not(:disabled), .dpad button.pressed {
+    transform: scale(0.95);
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+  }
+  .dpad .stop-btn { font-size: 11px; color: var(--muted); }
+  .ptz-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .kbd-hint { font-size: 11px; color: var(--muted); text-align: center; margin-top: 6px; }
+
+  /* Presets */
+  .preset-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .preset-chip {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    overflow: hidden;
+  }
+  .preset-chip button {
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    padding: 4px 8px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .preset-chip button:hover { background: rgba(59, 130, 246, 0.18); }
+  .preset-chip .del {
+    color: var(--muted);
+    padding: 4px 6px;
+    border-left: 1px solid var(--border);
+  }
+  .preset-chip .del:hover { background: rgba(239, 68, 68, 0.25); color: #fca5a5; }
+  .preset-form { display: flex; gap: 6px; }
+  .preset-form input { flex: 1; min-width: 0; }
+
+  /* Toggle rows */
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(37, 47, 66, 0.55);
+  }
+  .row:last-child { border-bottom: 0; padding-bottom: 0; }
+  .row:first-of-type { padding-top: 0; }
+
+  .switch {
+    position: relative;
+    width: 38px;
+    height: 21px;
+    display: inline-block;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute;
+    inset: 0;
+    cursor: pointer;
+    background: #263042;
+    border-radius: 999px;
+    transition: background 0.18s;
+  }
+  .slider::before {
+    content: "";
+    position: absolute;
+    width: 15px;
+    height: 15px;
+    left: 3px;
+    top: 3px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.18s;
+  }
+  .switch input:checked + .slider { background: var(--primary); }
+  .switch input:checked + .slider.warn-on { background: var(--warning); }
+  .switch input:checked + .slider::before { transform: translateX(17px); }
+
+  .vol-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .vol-row input[type="range"] { flex: 1; accent-color: var(--primary); }
+
+  .kv {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 10px;
+    font-size: 12px;
+  }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+
+  .toast {
+    position: fixed;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    z-index: 50;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <span id="statusDot" class="dot"></span>
+      <span>tp-ipc live</span>
+      <select id="cameraSelect" title="切换摄像头"></select>
+      <span id="codecBadge" class="badge">连接中</span>
+      <span id="latencyBadge" class="badge" hidden>--</span>
+    </div>
+    <div class="toolbar">
+      <div class="seg" title="视频流清晰度">
+        <button id="qSubBtn" type="button" class="active">流畅 SD</button>
+        <button id="qMainBtn" type="button">超清 4K</button>
+      </div>
+      <button id="muteBtn" type="button" class="btn" title="静音 / 开启声音 (快捷键 M)">静音中</button>
+      <button id="snapBtn" type="button" class="btn" title="下载 4K 抓拍原图 (快捷键 P)">4K 抓拍</button>
+      <button id="quickPrivacyBtn" type="button" class="btn warn" hidden>开启遮蔽</button>
+      <button id="reconnectBtn" type="button" class="btn" title="重新连接视频流">重连</button>
+      <button id="fsBtn" type="button" class="btn" title="全屏 (快捷键 F)">全屏</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="stage" id="stage">
+      <video id="player" autoplay playsinline muted></video>
+
+      <div id="privacyOverlay" class="overlay" hidden>
+        <div class="overlay-card">
+          <h2>物理隐私遮蔽已开启</h2>
+          <p>摄像头镜头当前已收纳进机身内部，处于物理遮蔽保护状态。</p>
+          <div class="overlay-actions">
+            <button id="unmaskWatchBtn" type="button" class="btn primary">解除隐私遮蔽并观看</button>
+            <button id="forceStreamBtn" type="button" class="btn">仍尝试连接</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="statusOverlay" class="overlay">
+        <div class="overlay-card">
+          <h2 id="overlayTitle">正在连接实时画面...</h2>
+          <p id="overlayDesc">正在建立本地 RTSP 无损封装通道</p>
+          <div class="overlay-actions">
+            <button id="overlayRetryBtn" type="button" class="btn primary" hidden>重试连接</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside>
+      <div class="card">
+        <div class="card-hdr">
+          <span>云台控制 (PTZ)</span>
+          <span id="ptzCoords">--</span>
+        </div>
+        <div class="dpad">
+          <div></div>
+          <button type="button" data-ptz="up" title="向上 (W / ↑)">▲</button>
+          <div></div>
+          <button type="button" data-ptz="left" title="向左 (A / ←)">◀</button>
+          <button type="button" data-ptz="stop" class="stop-btn" title="停止 (Space)">停止</button>
+          <button type="button" data-ptz="right" title="向右 (D / →)">▶</button>
+          <div></div>
+          <button type="button" data-ptz="down" title="向下 (S / ↓)">▼</button>
+          <div></div>
+        </div>
+        <div class="ptz-meta">
+          <span>步进幅度</span>
+          <div class="seg" id="stepSeg">
+            <button type="button" data-step="0.02">微调</button>
+            <button type="button" data-step="0.05" class="active">标准</button>
+            <button type="button" data-step="0.15">大幅</button>
+          </div>
+        </div>
+        <div class="kbd-hint">快捷键：WASD / 方向键转动，Space 停止，M 声音，P 抓拍，F 全屏</div>
+      </div>
+
+      <div class="card">
+        <div class="card-hdr">
+          <span>预置位</span>
+          <span id="presetCount">0</span>
+        </div>
+        <div id="presetList" class="preset-list"></div>
+        <form id="presetForm" class="preset-form">
+          <input id="presetNameInput" type="text" maxlength="32" placeholder="输入名称保存当前视角">
+          <button type="submit" class="btn">保存</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-hdr">
+          <span>画面与检测开关</span>
+          <button id="refreshStateBtn" type="button" class="btn" style="padding:2px 7px;font-size:11px">刷新</button>
+        </div>
+        <div class="row">
+          <span>物理隐私遮蔽</span>
+          <label class="switch"><input id="swPrivacy" type="checkbox"><span class="slider warn-on"></span></label>
+        </div>
+        <div class="row">
+          <span>夜视模式</span>
+          <div class="seg" id="nvSeg">
+            <button type="button" data-nv="inf_night_vision">红外</button>
+            <button type="button" data-nv="wtl_night_vision">全彩</button>
+            <button type="button" data-nv="md_night_vision">智能</button>
+          </div>
+        </div>
+        <div class="row">
+          <span>智能移动追踪</span>
+          <label class="switch"><input id="swTracking" type="checkbox"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <span>人形检测</span>
+          <label class="switch"><input id="swPerson" type="checkbox"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <span>移动侦测</span>
+          <label class="switch"><input id="swMotion" type="checkbox"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <span>镜头遮挡侦测</span>
+          <label class="switch"><input id="swTamper" type="checkbox"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <span>机身状态指示灯</span>
+          <label class="switch"><input id="swLED" type="checkbox"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hdr">
+          <span>扬声器与声光警报</span>
+          <span id="volLabel">--</span>
+        </div>
+        <div class="vol-row">
+          <span style="color:var(--muted);font-size:12px">音量</span>
+          <input id="volSlider" type="range" min="0" max="100" value="50">
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button id="alarmStartBtn" type="button" class="btn danger" style="flex:1">触发警报 (2s)</button>
+          <button id="alarmStopBtn" type="button" class="btn">停止</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hdr"><span>设备与存储状态</span></div>
+        <dl class="kv">
+          <dt>型号</dt><dd id="infoModel">--</dd>
+          <dt>固件</dt><dd id="infoFw">--</dd>
+          <dt>地址</dt><dd id="infoHost">--</dd>
+          <dt>SD 卡</dt><dd id="infoSD">--</dd>
+        </dl>
+      </div>
+    </aside>
+  </main>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const video = $('player');
+  if ('disableRemotePlayback' in video) {
+    video.disableRemotePlayback = true;
+  }
+
+  const state = {
+    camera: '',
+    quality: 'sub',
+    codecMode: 'copy',
+    ptzStep: 0.05,
+    ptzBusy: false,
+    privacyMasked: false,
+    forceWhenMasked: false,
+    streamEpoch: 0,
+    abortCtrl: null,
+    objectURL: '',
+    lagTimer: null,
+  };
+
+  let toastTimer = null;
+  function showToast(msg) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 2400);
+  }
+
+  async function apiGet(path) {
+    const res = await fetch(path, { credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  async function apiPost(path, body) {
+    const res = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'tp-ipc',
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  function setDot(mode) {
+    const dot = $('statusDot');
+    dot.className = 'dot' + (mode ? ' ' + mode : '');
+  }
+
+  function showStatusOverlay(title, desc, showRetry) {
+    $('overlayTitle').textContent = title;
+    $('overlayDesc').textContent = desc || '';
+    $('overlayRetryBtn').hidden = !showRetry;
+    $('statusOverlay').hidden = false;
+  }
+
+  function hideStatusOverlay() {
+    $('statusOverlay').hidden = true;
+  }
+
+  function resolveSupportedMime(MSE, serverMime) {
+    if (!MSE || typeof MSE.isTypeSupported !== 'function') return null;
+    if (MSE.isTypeSupported(serverMime)) return serverMime;
+    if (serverMime.includes('.0')) {
+      const alt = serverMime.replace(/\.0(?=[",])/g, '.B0');
+      if (MSE.isTypeSupported(alt)) return alt;
+    }
+    return null;
+  }
+
+  function stopStream() {
+    state.streamEpoch++;
+    if (state.abortCtrl) {
+      state.abortCtrl.abort();
+      state.abortCtrl = null;
+    }
+    if (state.lagTimer) {
+      clearInterval(state.lagTimer);
+      state.lagTimer = null;
+    }
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    if (state.objectURL) {
+      URL.revokeObjectURL(state.objectURL);
+      state.objectURL = '';
+    }
+    $('latencyBadge').hidden = true;
+  }
+
+  async function startStream(preferredCodec) {
+    stopStream();
+    if (state.privacyMasked && !state.forceWhenMasked) {
+      hideStatusOverlay();
+      $('privacyOverlay').hidden = false;
+      $('codecBadge').textContent = '隐私遮蔽中';
+      setDot('masked');
+      return;
+    }
+
+    $('privacyOverlay').hidden = true;
+    const codec = preferredCodec || state.codecMode || 'copy';
+    const epoch = ++state.streamEpoch;
+    const ctrl = new AbortController();
+    state.abortCtrl = ctrl;
+
+    const MSE = window.MediaSource || window.ManagedMediaSource;
+    if (!MSE) {
+      setDot('error');
+      showStatusOverlay('当前浏览器不支持 MSE 视频流', '请使用最新版 Safari、Chrome 或 Edge 打开，或在终端使用 tp-ipc live --player', false);
+      return;
+    }
+
+    showStatusOverlay('正在连接实时画面...', `${state.camera} · ${state.quality === 'main' ? '4K 主码流' : 'SD 子码流'}`, false);
+    $('codecBadge').textContent = '握手中...';
+    setDot('');
+
+    const url = `/api/stream?camera=${encodeURIComponent(state.camera)}&quality=${encodeURIComponent(state.quality)}&codec=${encodeURIComponent(codec)}`;
+    let res;
+    try {
+      res = await fetch(url, { signal: ctrl.signal, credentials: 'same-origin' });
+    } catch (err) {
+      if (ctrl.signal.aborted || epoch !== state.streamEpoch) return;
+      setDot('error');
+      showStatusOverlay('视频流连接失败', err.message || String(err), true);
+      $('codecBadge').textContent = '离线';
+      return;
+    }
+
+    if (epoch !== state.streamEpoch) return;
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      if (epoch !== state.streamEpoch) return;
+      setDot('error');
+      showStatusOverlay('无法拉取摄像头 RTSP 流', errBody.error || `HTTP ${res.status}`, true);
+      $('codecBadge').textContent = '连接失败';
+      return;
+    }
+
+    const serverMime = res.headers.get('X-Stream-Mime') || 'video/mp4; codecs="avc1.42E01F"';
+    const supportedMime = resolveSupportedMime(MSE, serverMime);
+    if (!supportedMime && codec === 'copy') {
+      ctrl.abort();
+      state.codecMode = 'h264';
+      showToast('当前浏览器不支持 H.265 硬解，已自动切换为 H.264 兼容流');
+      return startStream('h264');
+    }
+    if (!supportedMime) {
+      ctrl.abort();
+      setDot('error');
+      showStatusOverlay('浏览器不支持该视频编码', serverMime, true);
+      return;
+    }
+
+    const shortCodec = serverMime.includes('hvc1') || serverMime.includes('hev1')
+      ? 'HEVC 直通'
+      : (codec === 'h264' ? 'H.264 转码' : 'H.264 直通');
+    $('codecBadge').textContent = shortCodec;
+
+    const ms = new MSE();
+    state.objectURL = URL.createObjectURL(ms);
+    video.src = state.objectURL;
+
+    ms.addEventListener('sourceopen', async () => {
+      if (epoch !== state.streamEpoch) return;
+      let sb;
+      try {
+        sb = ms.addSourceBuffer(supportedMime);
+        sb.mode = 'segments';
+      } catch (e) {
+        if (codec === 'copy') {
+          ctrl.abort();
+          state.codecMode = 'h264';
+          startStream('h264');
+          return;
+        }
+        setDot('error');
+        showStatusOverlay('初始化解码器失败', e.message || String(e), true);
+        return;
+      }
+
+      const queue = [];
+      let firstFrameShown = false;
+
+      const pump = () => {
+        if (epoch !== state.streamEpoch || !sb || sb.updating) return;
+        if (queue.length === 0) {
+          // Trim old buffer (>18s behind playback head) so memory stays flat indefinitely
+          try {
+            if (sb.buffered.length > 0) {
+              const start = sb.buffered.start(0);
+              if (video.currentTime - start > 18) {
+                sb.remove(start, video.currentTime - 8);
+              }
+            }
+          } catch (_) {}
+          return;
+        }
+        let chunk;
+        if (queue.length === 1) {
+          chunk = queue.shift();
+        } else {
+          let total = 0;
+          for (const c of queue) total += c.byteLength;
+          chunk = new Uint8Array(total);
+          let off = 0;
+          while (queue.length > 0) {
+            const c = queue.shift();
+            chunk.set(c, off);
+            off += c.byteLength;
+          }
+        }
+        try {
+          sb.appendBuffer(chunk);
+        } catch (err) {
+          if (epoch === state.streamEpoch) {
+            setDot('error');
+            showStatusOverlay('视频流缓冲异常', err.message || String(err), true);
+          }
+        }
+      };
+
+      sb.addEventListener('updateend', () => {
+        if (epoch !== state.streamEpoch) return;
+        if (!firstFrameShown && sb.buffered.length > 0) {
+          firstFrameShown = true;
+          const end = sb.buffered.end(sb.buffered.length - 1);
+          if (end > 0.35) {
+            video.currentTime = Math.max(0, end - 0.15);
+          }
+          video.play().catch(() => {});
+          hideStatusOverlay();
+          setDot('live');
+        }
+        pump();
+      });
+
+      state.lagTimer = setInterval(() => {
+        if (epoch !== state.streamEpoch || !sb || sb.buffered.length === 0) return;
+        const end = sb.buffered.end(sb.buffered.length - 1);
+        const lag = Math.max(0, end - video.currentTime);
+        const badge = $('latencyBadge');
+        badge.hidden = false;
+        badge.textContent = `${lag.toFixed(1)}s`;
+        if (!video.paused) {
+          if (lag > 3.0) {
+            video.currentTime = Math.max(0, end - 0.2);
+            video.playbackRate = 1.0;
+          } else if (lag > 1.05) {
+            video.playbackRate = 1.06;
+          } else if (lag < 0.45 && video.playbackRate !== 1.0) {
+            video.playbackRate = 1.0;
+          }
+        }
+      }, 600);
+
+      const reader = res.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done || epoch !== state.streamEpoch) break;
+          if (value && value.byteLength > 0) {
+            queue.push(value);
+            pump();
+          }
+        }
+        if (epoch === state.streamEpoch && !ctrl.signal.aborted) {
+          setDot('error');
+          showStatusOverlay('实时流已断开', '摄像头连接中断，点击重试恢复预览', true);
+        }
+      } catch (err) {
+        if (epoch === state.streamEpoch && !ctrl.signal.aborted) {
+          setDot('error');
+          showStatusOverlay('实时流读取中断', err.message || String(err), true);
+        }
+      }
+    }, { once: true });
+  }
+
+  function isOn(obj) {
+    return obj && String(obj.enabled).toLowerCase() === 'on';
+  }
+
+  function renderPresets(presets) {
+    const box = $('presetList');
+    box.innerHTML = '';
+    $('presetCount').textContent = String(presets.length);
+    if (presets.length === 0) {
+      const empty = document.createElement('span');
+      empty.style.color = 'var(--muted)';
+      empty.style.fontSize = '12px';
+      empty.textContent = '暂无保存的预置位';
+      box.appendChild(empty);
+      return;
+    }
+    for (const p of presets) {
+      const chip = document.createElement('div');
+      chip.className = 'preset-chip';
+      const goBtn = document.createElement('button');
+      goBtn.type = 'button';
+      goBtn.textContent = p.name || `#${p.id}`;
+      goBtn.title = `跳转到预置位 [${p.id}]`;
+      goBtn.addEventListener('click', async () => {
+        try {
+          await apiPost('/api/preset', { camera: state.camera, action: 'goto', id: p.id });
+          showToast(`正在转向预置位：${p.name || p.id}`);
+        } catch (e) {
+          showToast(`预置位跳转失败：${e.message}`);
+        }
+      });
+      chip.appendChild(goBtn);
+
+      if (!p.read_only) {
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'del';
+        delBtn.textContent = '×';
+        delBtn.title = '删除该预置位';
+        delBtn.addEventListener('click', async () => {
+          try {
+            const res = await apiPost('/api/preset', { camera: state.camera, action: 'remove', id: p.id });
+            renderPresets(res.presets || []);
+            showToast(`已删除预置位：${p.name || p.id}`);
+          } catch (e) {
+            showToast(`删除失败：${e.message}`);
+          }
+        });
+        chip.appendChild(delBtn);
+      }
+      box.appendChild(chip);
+    }
+  }
+
+  function applyState(data, shouldSyncStream) {
+    const info = data.info || {};
+    const st = data.status || {};
+
+    $('infoModel').textContent = [info.model, info.hardware].filter(Boolean).join(' v') || '--';
+    $('infoFw').textContent = info.firmware || '--';
+    $('infoHost').textContent = data.proxy ? `${data.host || '--'} (via ${data.proxy})` : (data.host || '--');
+    if (Array.isArray(st.storage) && st.storage.length > 0) {
+      const d = st.storage[0];
+      $('infoSD').textContent = `${d.free || '?'} 可用 / ${d.total || '?'} (${d.status || 'ok'})`;
+    } else {
+      $('infoSD').textContent = '未检测到存储卡';
+    }
+
+    if (data.ptz && typeof data.ptz.pan === 'number') {
+      $('ptzCoords').textContent = `P ${data.ptz.pan.toFixed(2)} · T ${data.ptz.tilt.toFixed(2)}`;
+    } else {
+      $('ptzCoords').textContent = '';
+    }
+
+    const wasMasked = state.privacyMasked;
+    state.privacyMasked = isOn(st.privacy);
+    $('swPrivacy').checked = state.privacyMasked;
+    $('quickPrivacyBtn').hidden = state.privacyMasked;
+
+    $('swTracking').checked = isOn(st.tracking);
+    $('swPerson').checked = isOn(st.person);
+    $('swMotion').checked = isOn(st.motion);
+    $('swTamper').checked = isOn(st.tamper);
+    $('swLED').checked = isOn(st.led);
+
+    for (const btn of $('nvSeg').querySelectorAll('button')) {
+      btn.classList.toggle('active', btn.dataset.nv === st.night_vision);
+    }
+
+    const vol = st.speaker && st.speaker.volume !== undefined ? Number(st.speaker.volume) : NaN;
+    if (!Number.isNaN(vol)) {
+      $('volSlider').value = String(vol);
+      $('volLabel').textContent = `${vol}%`;
+    }
+
+    renderPresets(data.presets || []);
+
+    if (shouldSyncStream || wasMasked !== state.privacyMasked) {
+      startStream();
+    }
+  }
+
+  async function refreshState(shouldSyncStream = false) {
+    try {
+      const data = await apiGet(`/api/state?camera=${encodeURIComponent(state.camera)}`);
+      applyState(data, shouldSyncStream);
+    } catch (err) {
+      showToast(`读取状态失败：${err.message}`);
+      if (shouldSyncStream) {
+        startStream();
+      }
+    }
+  }
+
+  async function movePTZ(action) {
+    if (state.ptzBusy && action !== 'stop') return;
+    state.ptzBusy = true;
+    const btn = document.querySelector(`[data-ptz="${action}"]`);
+    if (btn) btn.classList.add('pressed');
+    try {
+      let pan = 0, tilt = 0;
+      if (action === 'left') pan = -state.ptzStep;
+      if (action === 'right') pan = state.ptzStep;
+      if (action === 'up') tilt = state.ptzStep;
+      if (action === 'down') tilt = -state.ptzStep;
+      const body = action === 'stop'
+        ? { camera: state.camera, action: 'stop' }
+        : { camera: state.camera, action: 'move', pan, tilt };
+      const res = await apiPost('/api/ptz', body);
+      if (res.ptz && typeof res.ptz.pan === 'number') {
+        $('ptzCoords').textContent = `P ${res.ptz.pan.toFixed(2)} · T ${res.ptz.tilt.toFixed(2)}`;
+      }
+    } catch (e) {
+      showToast(`云台操作失败：${e.message}`);
+    } finally {
+      if (btn) setTimeout(() => btn.classList.remove('pressed'), 120);
+      state.ptzBusy = false;
+    }
+  }
+
+  async function togglePrivacy(enabled) {
+    $('swPrivacy').disabled = true;
+    $('unmaskWatchBtn').disabled = true;
+    try {
+      await apiPost('/api/control', { camera: state.camera, target: 'privacy', enabled });
+      state.privacyMasked = enabled;
+      state.forceWhenMasked = false;
+      $('swPrivacy').checked = enabled;
+      $('quickPrivacyBtn').hidden = enabled;
+      if (!enabled) {
+        showStatusOverlay('正在展开镜头...', '等待物理隐私遮蔽解除', false);
+        await new Promise((r) => setTimeout(r, 900));
+      }
+      await refreshState(true);
+      showToast(enabled ? '已开启物理隐私遮蔽' : '已解除隐私遮蔽');
+    } catch (e) {
+      $('swPrivacy').checked = state.privacyMasked;
+      showToast(`切换隐私遮蔽失败：${e.message}`);
+    } finally {
+      $('swPrivacy').disabled = false;
+      $('unmaskWatchBtn').disabled = false;
+    }
+  }
+
+  function bindEvents() {
+    $('cameraSelect').addEventListener('change', (e) => {
+      state.camera = e.target.value;
+      state.codecMode = 'copy';
+      state.forceWhenMasked = false;
+      refreshState(true);
+    });
+
+    const setQuality = (q) => {
+      if (state.quality === q) return;
+      state.quality = q;
+      $('qSubBtn').classList.toggle('active', q === 'sub');
+      $('qMainBtn').classList.toggle('active', q === 'main');
+      startStream();
+    };
+    $('qSubBtn').addEventListener('click', () => setQuality('sub'));
+    $('qMainBtn').addEventListener('click', () => setQuality('main'));
+
+    const toggleMute = () => {
+      video.muted = !video.muted;
+      if (!video.muted) video.play().catch(() => {});
+      $('muteBtn').textContent = video.muted ? '静音中' : '声音开启';
+      $('muteBtn').classList.toggle('primary', !video.muted);
+    };
+    $('muteBtn').addEventListener('click', toggleMute);
+
+    const triggerSnapshot = () => {
+      if (state.privacyMasked) {
+        showToast('当前处于隐私遮蔽状态，请先解除遮蔽');
+        return;
+      }
+      showToast('正在抓取 4K 原图...');
+      const a = document.createElement('a');
+      a.href = `/api/snapshot?camera=${encodeURIComponent(state.camera)}&hq=1&download=1`;
+      a.click();
+    };
+    $('snapBtn').addEventListener('click', triggerSnapshot);
+
+    $('reconnectBtn').addEventListener('click', () => startStream());
+    $('overlayRetryBtn').addEventListener('click', () => startStream());
+    $('refreshStateBtn').addEventListener('click', () => refreshState(false));
+
+    $('unmaskWatchBtn').addEventListener('click', () => togglePrivacy(false));
+    $('quickPrivacyBtn').addEventListener('click', () => togglePrivacy(true));
+    $('forceStreamBtn').addEventListener('click', () => {
+      state.forceWhenMasked = true;
+      startStream();
+    });
+
+    const toggleFullscreen = () => {
+      const el = $('stage');
+      if (!document.fullscreenElement) {
+        if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+        else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    };
+    $('fsBtn').addEventListener('click', toggleFullscreen);
+
+    for (const btn of document.querySelectorAll('[data-ptz]')) {
+      btn.addEventListener('click', () => movePTZ(btn.dataset.ptz));
+    }
+
+    for (const btn of $('stepSeg').querySelectorAll('button')) {
+      btn.addEventListener('click', () => {
+        state.ptzStep = Number(btn.dataset.step);
+        for (const b of $('stepSeg').querySelectorAll('button')) b.classList.toggle('active', b === btn);
+      });
+    }
+
+    $('presetForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = $('presetNameInput');
+      const name = input.value.trim();
+      if (!name) return;
+      try {
+        const res = await apiPost('/api/preset', { camera: state.camera, action: 'save', name });
+        input.value = '';
+        renderPresets(res.presets || []);
+        showToast(`已保存预置位：${name}`);
+      } catch (err) {
+        showToast(`保存失败：${err.message}`);
+      }
+    });
+
+    $('swPrivacy').addEventListener('change', (e) => togglePrivacy(e.target.checked));
+
+    const bindSwitch = (id, payloadFn, label) => {
+      $(id).addEventListener('change', async (e) => {
+        const enabled = e.target.checked;
+        try {
+          await apiPost('/api/control', { camera: state.camera, ...payloadFn(enabled) });
+          showToast(`${label}已${enabled ? '开启' : '关闭'}`);
+        } catch (err) {
+          e.target.checked = !enabled;
+          showToast(`设置失败：${err.message}`);
+        }
+      });
+    };
+    bindSwitch('swTracking', (enabled) => ({ target: 'tracking', enabled }), '智能追踪');
+    bindSwitch('swPerson', (enabled) => ({ target: 'detect', kind: 'person', enabled }), '人形检测');
+    bindSwitch('swMotion', (enabled) => ({ target: 'detect', kind: 'motion', enabled }), '移动侦测');
+    bindSwitch('swTamper', (enabled) => ({ target: 'detect', kind: 'tamper', enabled }), '遮挡侦测');
+    bindSwitch('swLED', (enabled) => ({ target: 'led', enabled }), '状态指示灯');
+
+    for (const btn of $('nvSeg').querySelectorAll('button')) {
+      btn.addEventListener('click', async () => {
+        const mode = btn.dataset.nv;
+        try {
+          await apiPost('/api/control', { camera: state.camera, target: 'night_vision', mode });
+          for (const b of $('nvSeg').querySelectorAll('button')) b.classList.toggle('active', b === btn);
+          showToast('已切换夜视模式');
+        } catch (err) {
+          showToast(`夜视切换失败：${err.message}`);
+        }
+      });
+    }
+
+    $('volSlider').addEventListener('input', (e) => {
+      $('volLabel').textContent = `${e.target.value}%`;
+    });
+    $('volSlider').addEventListener('change', async (e) => {
+      const volume = Number(e.target.value);
+      try {
+        await apiPost('/api/control', { camera: state.camera, target: 'volume', volume });
+        showToast(`扬声器音量设为 ${volume}%`);
+      } catch (err) {
+        showToast(`音量设置失败：${err.message}`);
+      }
+    });
+
+    $('alarmStartBtn').addEventListener('click', async () => {
+      try {
+        showToast('正在触发 2 秒声光警报...');
+        await apiPost('/api/control', { camera: state.camera, target: 'alarm', action: 'start', seconds: 2 });
+        showToast('警报已结束');
+      } catch (err) {
+        showToast(`触发警报失败：${err.message}`);
+      }
+    });
+    $('alarmStopBtn').addEventListener('click', async () => {
+      try {
+        await apiPost('/api/control', { camera: state.camera, target: 'alarm', action: 'stop' });
+        showToast('警报已停止');
+      } catch (err) {
+        showToast(`停止警报失败：${err.message}`);
+      }
+    });
+
+    window.addEventListener('keydown', (e) => {
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA')) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === 'w' || e.key === 'ArrowUp') { e.preventDefault(); movePTZ('up'); }
+      else if (k === 's' || e.key === 'ArrowDown') { e.preventDefault(); movePTZ('down'); }
+      else if (k === 'a' || e.key === 'ArrowLeft') { e.preventDefault(); movePTZ('left'); }
+      else if (k === 'd' || e.key === 'ArrowRight') { e.preventDefault(); movePTZ('right'); }
+      else if (e.key === ' ') { e.preventDefault(); movePTZ('stop'); }
+      else if (k === 'm') { e.preventDefault(); toggleMute(); }
+      else if (k === 'f') { e.preventDefault(); toggleFullscreen(); }
+      else if (k === 'p') { e.preventDefault(); triggerSnapshot(); }
+    });
+  }
+
+  async function init() {
+    bindEvents();
+    try {
+      const boot = await apiGet('/api/bootstrap');
+      const sel = $('cameraSelect');
+      sel.innerHTML = '';
+      for (const cam of (boot.cameras || [])) {
+        const opt = document.createElement('option');
+        opt.value = cam.name;
+        opt.textContent = `${cam.name} (${cam.host})`;
+        sel.appendChild(opt);
+      }
+      const urlCam = new URLSearchParams(location.search).get('camera');
+      state.camera = (urlCam && (boot.cameras || []).some((c) => c.name === urlCam))
+        ? urlCam
+        : boot.default_camera;
+      sel.value = state.camera;
+
+      if (boot.default_quality === 'main') {
+        state.quality = 'main';
+        $('qSubBtn').classList.remove('active');
+        $('qMainBtn').classList.add('active');
+      }
+
+      await refreshState(true);
+    } catch (err) {
+      setDot('error');
+      showStatusOverlay('初始化控制台失败', err.message || String(err), false);
+    }
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

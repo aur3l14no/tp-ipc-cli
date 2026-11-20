@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -78,6 +79,7 @@ func describeErrorCode(code int) string {
 
 type Client struct {
 	cfg            config.Settings
+	proxySpec      config.ProxySpec
 	httpClient     *http.Client
 	longPollClient *http.Client
 
@@ -85,22 +87,67 @@ type Client struct {
 	stateMu sync.RWMutex
 	stok    string
 	userID  int
+
+	bridgeMu       sync.Mutex
+	rtspBridgeLn   net.Listener
+	rtspBridgePort int
 }
 
 func NewClient(cfg config.Settings) (*Client, error) {
 	if cfg.Host == "" {
 		return nil, errors.New("camera host is not configured (set IPC_HOST, --host, or run `tp-ipc configure`)")
 	}
-	dialFn := (&net.Dialer{
-		Timeout:   6 * time.Second,
-		KeepAlive: 15 * time.Second,
-	}).DialContext
+	if cfg.Scheme == "" {
+		cfg.Scheme = config.DefaultScheme
+	}
+	if cfg.HTTPPort <= 0 {
+		if cfg.Scheme == "https" {
+			cfg.HTTPPort = 443
+		} else {
+			cfg.HTTPPort = config.DefaultHTTPPort
+		}
+	}
+	if cfg.RTSPPort <= 0 {
+		cfg.RTSPPort = config.DefaultRTSPPort
+	}
+	if cfg.ONVIFPort <= 0 {
+		cfg.ONVIFPort = config.DefaultONVIFPort
+	}
+	var pSpec config.ProxySpec
+	if strings.TrimSpace(cfg.Proxy) != "" {
+		var err error
+		pSpec, err = config.ParseProxyInput(cfg.Proxy)
+		if err != nil {
+			return nil, err
+		}
+		if pSpec.DirectOverride {
+			pSpec = config.ProxySpec{}
+			cfg.Proxy = ""
+		} else {
+			cfg.Proxy = pSpec.Canonical()
+		}
+	}
+
+	c := &Client{
+		cfg:       cfg,
+		proxySpec: pSpec,
+	}
+
+	dialFn := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return c.dialWithTimeout(ctx, network, addr, 6*time.Second)
+	}
+	if pSpec.Kind != "" {
+		dialFn = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return c.dialWithTimeout(ctx, network, addr, 12*time.Second)
+		}
+	}
+
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: true, // Local camera uses self-signed certs when HTTPS is enabled
 		MinVersion:         tls.VersionTLS10,
 	}
 	transport := &http.Transport{
-		Proxy:                 nil, // Never route LAN camera traffic through system/env HTTP proxies
+		Proxy:                 nil, // Never route LAN camera traffic through ambient env HTTP proxies
 		DialContext:           dialFn,
 		TLSClientConfig:       tlsCfg,
 		MaxIdleConns:          4,
@@ -114,16 +161,18 @@ func NewClient(cfg config.Settings) (*Client, error) {
 		DisableKeepAlives:     true,
 		ResponseHeaderTimeout: 0, // Governed by per-request context deadline during ONVIF PullMessages
 	}
-	return &Client{
-		cfg: cfg,
-		httpClient: &http.Client{
-			Transport: transport,
-			Timeout:   12 * time.Second,
-		},
-		longPollClient: &http.Client{
-			Transport: longPollTransport,
-		},
-	}, nil
+	httpTimeout := 12 * time.Second
+	if pSpec.Kind != "" {
+		httpTimeout = 20 * time.Second
+	}
+	c.httpClient = &http.Client{
+		Transport: transport,
+		Timeout:   httpTimeout,
+	}
+	c.longPollClient = &http.Client{
+		Transport: longPollTransport,
+	}
+	return c, nil
 }
 
 func (c *Client) Settings() config.Settings {
@@ -177,8 +226,10 @@ func (c *Client) rawHTTPWithClient(ctx context.Context, hc *http.Client, targetU
 	resp, err := hc.Do(req)
 	if err != nil {
 		msg := c.Redact(err.Error())
-		if hint := macosLocalNetworkHint(err, c.cfg.Host); hint != "" {
-			msg += " " + hint
+		if c.proxySpec.Kind == "" {
+			if hint := macosLocalNetworkHint(err, c.cfg.Host); hint != "" {
+				msg += " " + hint
+			}
 		}
 		return 0, nil, fmt.Errorf("camera HTTP request failed: %s", msg)
 	}
