@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -147,5 +148,71 @@ func TestLoadForConfigureDoesNotLeakDefaultProfile(t *testing.T) {
 	}
 	if dogeeWithEnv.Scheme != "https" || dogeeWithEnv.HTTPPort != 443 || dogeeWithEnv.Password != "dogee_env_pw" {
 		t.Fatalf("unexpected dogee env/https settings: %+v", dogeeWithEnv)
+	}
+}
+
+func TestProxyParsingSecurityAndOverrides(t *testing.T) {
+	// 1. Bare SSH alias, user@host:port, ssh://, socks5://, http://, direct
+	s1, err := ParseProxyInput("home-nas")
+	if err != nil || s1.Kind != "ssh" || s1.SSHTarget != "home-nas" || s1.Port != 0 || s1.Canonical() != "ssh://home-nas" {
+		t.Fatalf("unexpected bare SSH parse: %+v err=%v", s1, err)
+	}
+
+	s2, err := ParseProxyInput("ubuntu@203.0.113.5:2222")
+	if err != nil || s2.Kind != "ssh" || s2.SSHTarget != "ubuntu@203.0.113.5" || s2.Port != 2222 || s2.Canonical() != "ssh://ubuntu@203.0.113.5:2222" {
+		t.Fatalf("unexpected user@host:port parse: %+v err=%v", s2, err)
+	}
+
+	s3, err := ParseProxyInput("socks5://puser:psecret@127.0.0.1:1080")
+	if err != nil || s3.Kind != "socks5" || s3.Port != 1080 || s3.User != "puser" || s3.Password != "psecret" {
+		t.Fatalf("unexpected socks5 parse: %+v err=%v", s3, err)
+	}
+	if strings.Contains(s3.Redacted(), "psecret") {
+		t.Fatalf("Redacted leaked proxy password: %s", s3.Redacted())
+	}
+
+	// 2. Reject SSH option injection & invalid inputs
+	badProxies := []string{
+		"-oProxyCommand=evil",
+		"-oLocalCommand=id@host",
+		"user@-badhost",
+		"ssh://-oProxyCommand=evil",
+		"ssh://user:pass@host",
+		"ssh://host/extra-path",
+		"ftp://127.0.0.1:21",
+		"host with spaces",
+	}
+	for _, bad := range badProxies {
+		if _, err := ParseProxyInput(bad); err == nil {
+			t.Fatalf("expected ParseProxyInput(%q) to fail", bad)
+		}
+	}
+
+	// 3. Profile persistence + "--proxy direct" override + Redact
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	if _, err := Save(Settings{
+		Name:     "remote-cam",
+		Host:     "10.100.20.60",
+		User:     "admin",
+		Password: "cam_pw",
+		Proxy:    "home-box",
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(Overrides{})
+	if err != nil || loaded.Proxy != "ssh://home-box" {
+		t.Fatalf("expected saved ssh://home-box proxy, got %+v err=%v", loaded, err)
+	}
+
+	directCfg, err := Load(Overrides{Proxy: "direct"})
+	if err != nil || directCfg.Proxy != "" {
+		t.Fatalf("expected --proxy direct to clear saved proxy, got %+v err=%v", directCfg, err)
+	}
+
+	t.Setenv("IPC_CAMERAS", `{"badcam":{"host":"10.100.20.61","proxy":"-oProxyCommand=evil"}}`)
+	if _, err := LoadStore(); err == nil {
+		t.Fatal("expected invalid proxy in IPC_CAMERAS to fail LoadStore")
 	}
 }

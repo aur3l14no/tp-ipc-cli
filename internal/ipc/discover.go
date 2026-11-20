@@ -267,9 +267,14 @@ func DiscoverLAN(ctx context.Context, timeout time.Duration) ([]DiscoveredCamera
 	return results, nil
 }
 
-// DiscoverCIDR scans a /24../32 IPv4 CIDR block concurrently via unauthenticated GET /pc/Content.htm,
+// DiscoverCIDR scans a /22../32 IPv4 CIDR block concurrently via unauthenticated GET /pc/Content.htm,
 // finding TP-Link TL-IPC cameras even across routed VLANs or VPNs where L2 multicast cannot cross.
 func DiscoverCIDR(ctx context.Context, cidr string, timeout time.Duration) ([]DiscoveredCamera, error) {
+	return DiscoverCIDRWithProxy(ctx, cidr, "", timeout)
+}
+
+// DiscoverCIDRWithProxy scans a /22../32 IPv4 CIDR block optionally through an SSH/SOCKS5/HTTP proxy.
+func DiscoverCIDRWithProxy(ctx context.Context, cidr string, rawProxy string, timeout time.Duration) ([]DiscoveredCamera, error) {
 	prefixIP, ipNet, err := net.ParseCIDR(strings.TrimSpace(cidr))
 	if err != nil {
 		return nil, fmt.Errorf("invalid CIDR %q (example: 192.168.1.0/24): %w", cidr, err)
@@ -284,6 +289,26 @@ func DiscoverCIDR(ctx context.Context, cidr string, timeout time.Duration) ([]Di
 	}
 	if timeout <= 0 {
 		timeout = 800 * time.Millisecond
+	}
+
+	var pSpec config.ProxySpec
+	canonicalProxy := ""
+	if strings.TrimSpace(rawProxy) != "" {
+		pSpec, err = config.ParseProxyInput(rawProxy)
+		if err != nil {
+			return nil, err
+		}
+		if !pSpec.DirectOverride {
+			canonicalProxy = pSpec.Canonical()
+		}
+	}
+	if pSpec.Kind == "ssh" {
+		warmCtx, cancelWarm := context.WithTimeout(ctx, 15*time.Second)
+		_, warmErr := globalSSHPool.getTunnel(warmCtx, pSpec)
+		cancelWarm()
+		if warmErr != nil {
+			return nil, warmErr
+		}
 	}
 
 	var hosts []string
@@ -312,6 +337,10 @@ func DiscoverCIDR(ctx context.Context, cidr string, timeout time.Duration) ([]Di
 		wg    sync.WaitGroup
 	)
 	workers := 64
+	if pSpec.Kind == "ssh" {
+		// Default OpenSSH sshd MaxSessions is 10 per multiplexed connection; stay safely below 10.
+		workers = 8
+	}
 	if len(hosts) < workers {
 		workers = len(hosts)
 	}
@@ -328,6 +357,7 @@ func DiscoverCIDR(ctx context.Context, cidr string, timeout time.Duration) ([]Di
 					Scheme:   "http",
 					Host:     host,
 					HTTPPort: 80,
+					Proxy:    canonicalProxy,
 				})
 				if err == nil {
 					if st, aErr := cl.ActivationStatus(pCtx); aErr == nil {

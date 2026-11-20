@@ -17,10 +17,10 @@ import (
 
 	"github.com/aur3l14no/tp-ipc-cli/internal/config"
 	"github.com/aur3l14no/tp-ipc-cli/internal/ipc"
-	"github.com/aur3l14no/tp-ipc-cli/internal/mcp"
+	"github.com/aur3l14no/tp-ipc-cli/internal/live"
 )
 
-var version = mcp.ServerVersion
+var version = "0.3.3"
 
 type globalOptions struct {
 	jsonOut bool
@@ -136,6 +136,18 @@ func extractGlobalFlags(args []string, stdin io.Reader) (globalOptions, []string
 				return opts, nil, fmt.Errorf("invalid --onvif-port %q", v)
 			}
 			opts.ov.ONVIFPort = p
+		case "--proxy", "-x":
+			v, err := takeValue(&i, name, inlineVal, hasInline)
+			if err != nil {
+				return opts, nil, err
+			}
+			opts.ov.Proxy = v
+		case "--ssh":
+			v, err := takeValue(&i, name, inlineVal, hasInline)
+			if err != nil {
+				return opts, nil, err
+			}
+			opts.ov.Proxy = config.EnsureSSHProxyPrefix(v)
 		default:
 			rest = append(rest, arg)
 		}
@@ -144,6 +156,8 @@ func extractGlobalFlags(args []string, stdin io.Reader) (globalOptions, []string
 }
 
 func run(ctx context.Context, rawArgs []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	defer ipc.CloseSharedProxies()
+
 	g, args, err := extractGlobalFlags(rawArgs, stdin)
 	if err != nil {
 		return err
@@ -166,18 +180,14 @@ func run(ctx context.Context, rawArgs []string, stdin io.Reader, stdout, stderr 
 		}
 		fmt.Fprintf(stdout, "tp-ipc %s\n", version)
 		return nil
-	case "mcp":
-		srv := mcp.NewServer(g.ov)
-		if err := srv.Serve(ctx, stdin, stdout); err != nil && !errors.Is(err, context.Canceled) {
-			return err
-		}
-		return nil
 	case "discover":
 		return cmdDiscover(ctx, g, subArgs, stdout)
 	case "camera", "cameras", "cam":
 		return cmdCamera(ctx, g, subArgs, stdin, stdout, stderr)
 	case "configure":
 		return cmdConfigure(ctx, g, subArgs, stdin, stdout, stderr, true)
+	case "live":
+		return cmdLive(ctx, g, subArgs, stdout)
 	}
 
 	cfg, err := config.Load(g.ov)
@@ -188,6 +198,7 @@ func run(ctx context.Context, rawArgs []string, stdin io.Reader, stdout, stderr 
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 
 	switch cmd {
 	case "check":
@@ -206,6 +217,9 @@ func run(ctx context.Context, rawArgs []string, stdin io.Reader, stdout, stderr 
 			"rtsp_sub":  cfg.RTSPURL("stream2", true),
 			"onvif":     cfg.ONVIFBaseURL() + "/onvif/service",
 		}
+		if p := cfg.RedactedProxy(); p != "" {
+			out["proxy"] = p
+		}
 		if g.jsonOut {
 			return writeJSON(stdout, out)
 		}
@@ -215,6 +229,9 @@ func run(ctx context.Context, rawArgs []string, stdin io.Reader, stdout, stderr 
 		}
 		fmt.Fprintf(stdout, "Connected: %s (%s) [%s]\nFirmware:  %s\nRTSP 4K:   %s\nRTSP Sub:  %s\n",
 			info.Model, info.Alias, camLabel, info.Firmware, cfg.RTSPURL("stream1", true), cfg.RTSPURL("stream2", true))
+		if p := cfg.RedactedProxy(); p != "" {
+			fmt.Fprintf(stdout, "Proxy:     %s\n", p)
+		}
 		return nil
 
 	case "activation":
@@ -452,13 +469,31 @@ func cmdDiscover(ctx context.Context, g globalOptions, subArgs []string, stdout 
 	if err := fs.Parse(subArgs); err != nil || *timeoutSec < 1 || *timeoutSec > 15 {
 		return errors.New("usage: tp-ipc discover [--timeout 2] [--cidr 192.168.1.0/24]")
 	}
+	proxySpec := strings.TrimSpace(g.ov.Proxy)
+	if proxySpec == "" {
+		if v := strings.TrimSpace(os.Getenv("IPC_PROXY")); v != "" {
+			proxySpec = v
+		} else if v := strings.TrimSpace(os.Getenv("IPC_SSH")); v != "" {
+			proxySpec = config.EnsureSSHProxyPrefix(v)
+		}
+	}
+
 	var (
 		found []ipc.DiscoveredCamera
 		err   error
 	)
 	if strings.TrimSpace(*cidr) != "" {
-		found, err = ipc.DiscoverCIDR(ctx, *cidr, time.Duration(*timeoutSec)*time.Second)
+		found, err = ipc.DiscoverCIDRWithProxy(ctx, *cidr, proxySpec, time.Duration(*timeoutSec)*time.Second)
 	} else {
+		if proxySpec != "" {
+			p, pErr := config.ParseProxyInput(proxySpec)
+			if pErr != nil {
+				return pErr
+			}
+			if !p.DirectOverride && p.Kind != "" {
+				return fmt.Errorf("L2 multicast discovery cannot traverse proxy %s; pass --cidr <subnet/24> (e.g. --cidr 192.168.1.0/24)", p.Redacted())
+			}
+		}
 		found, err = ipc.DiscoverLAN(ctx, time.Duration(*timeoutSec)*time.Second)
 	}
 	if err != nil {
@@ -516,8 +551,12 @@ func cmdCamera(ctx context.Context, g globalOptions, subArgs []string, stdin io.
 			if c.Default {
 				marker = "*"
 			}
-			fmt.Fprintf(stdout, "%s %-14s  %s@%s  (http:%d rtsp:%d onvif:%d)\n",
-				marker, c.Name, c.User, c.Host, c.HTTPPort, c.RTSPPort, c.ONVIFPort)
+			extra := ""
+			if c.Proxy != "" {
+				extra = " via " + c.Proxy
+			}
+			fmt.Fprintf(stdout, "%s %-14s  %s@%s  (http:%d rtsp:%d onvif:%d%s)\n",
+				marker, c.Name, c.User, c.Host, c.HTTPPort, c.RTSPPort, c.ONVIFPort, extra)
 		}
 		return nil
 
@@ -639,6 +678,7 @@ func cmdConfigure(ctx context.Context, g globalOptions, subArgs []string, stdin 
 		Scheme:   cfg.Scheme,
 		Host:     cfg.Host,
 		HTTPPort: cfg.HTTPPort,
+		Proxy:    cfg.Proxy,
 	})
 	if err != nil {
 		return err
@@ -825,6 +865,100 @@ func cmdRecord(ctx context.Context, client *ipc.Client, g globalOptions, subArgs
 	}
 	fmt.Fprintf(stdout, "Recorded %ds (%s) to %s (%d bytes)\n", res.Seconds, res.Quality, res.Path, res.Bytes)
 	return nil
+}
+
+func cmdLive(ctx context.Context, g globalOptions, subArgs []string, stdout io.Writer) error {
+	normalized := make([]string, 0, len(subArgs))
+	for i := 0; i < len(subArgs); i++ {
+		arg := subArgs[i]
+		if arg == "--" {
+			normalized = append(normalized, subArgs[i:]...)
+			break
+		}
+		if arg == "--player" || arg == "-player" {
+			if i+1 >= len(subArgs) || strings.HasPrefix(subArgs[i+1], "-") {
+				normalized = append(normalized, "--player=auto")
+				continue
+			}
+		}
+		normalized = append(normalized, arg)
+	}
+
+	fs := flag.NewFlagSet("live", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	hq := fs.Bool("hq", false, "Start on 4K main stream (/stream1)")
+	hqAlias := fs.Bool("4k", false, "Alias for --hq")
+	listenAddr := fs.String("listen", "", "Listen address for web console (default 127.0.0.1:0)")
+	port := fs.Int("port", 0, "Listen port on 127.0.0.1 (shorthand for --listen 127.0.0.1:<port>)")
+	noOpen := fs.Bool("no-open", false, "Do not auto-open browser")
+	player := fs.String("player", "", "Open in native player instead of web console (auto, mpv, ffplay, iina, vlc)")
+	if err := fs.Parse(normalized); err != nil || fs.NArg() > 0 {
+		return errors.New("usage: tp-ipc live [--hq|--4k] [--listen 127.0.0.1:0] [--port PORT] [--no-open] [--player [auto|mpv|ffplay|iina|vlc]]")
+	}
+
+	highQuality := *hq || *hqAlias
+
+	if strings.TrimSpace(*player) != "" {
+		cfg, err := config.Load(g.ov)
+		if err != nil {
+			return err
+		}
+		client, err := ipc.NewClient(cfg)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		var progressOut io.Writer = stdout
+		if g.jsonOut {
+			progressOut = nil
+		}
+		if err := live.LaunchPlayer(ctx, client, highQuality, *player, progressOut); err != nil {
+			return err
+		}
+		if g.jsonOut {
+			return writeJSON(stdout, map[string]any{"ok": true, "mode": "player", "camera": cfg.Name})
+		}
+		return nil
+	}
+
+	bind := strings.TrimSpace(*listenAddr)
+	if bind == "" {
+		if *port < 0 || *port > 65535 {
+			return fmt.Errorf("invalid --port %d", *port)
+		}
+		bind = fmt.Sprintf("127.0.0.1:%d", *port)
+	}
+
+	srv, err := live.NewServer(live.Options{
+		ListenAddr:  bind,
+		HighQuality: highQuality,
+		Overrides:   g.ov,
+	})
+	if err != nil {
+		return err
+	}
+
+	baseURL, authURL, waitFn, err := srv.Start(ctx)
+	if err != nil {
+		return err
+	}
+
+	if g.jsonOut {
+		_ = writeJSON(stdout, map[string]any{
+			"mode":     "web",
+			"camera":   srv.DefaultCamera(),
+			"base_url": baseURL,
+			"url":      authURL,
+		})
+	} else {
+		fmt.Fprintf(stdout, "Live web console (%s): %s\nPress Ctrl+C to stop.\n", srv.DefaultCamera(), authURL)
+	}
+
+	if !*noOpen {
+		_ = live.OpenBrowser(authURL)
+	}
+
+	return waitFn()
 }
 
 func cmdPTZ(ctx context.Context, client *ipc.Client, g globalOptions, subArgs []string, stdout io.Writer) error {
@@ -1197,7 +1331,7 @@ func writeJSON(w io.Writer, v any) error {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprint(w, `tp-ipc — Pure-Go CLI & multi-camera MCP server for mainland TP-LINK TL-IPC cameras
+	fmt.Fprint(w, `tp-ipc — Pure-Go multi-camera CLI for mainland TP-LINK TL-IPC cameras
 
 Usage:
   tp-ipc [global flags] <command> [args]
@@ -1215,6 +1349,8 @@ Camera Commands (target any profile via -c <name>):
   activation                       Check activation status without logging in
   info                             Show model, firmware, MAC, and capabilities
   status                           Show detectors, privacy, night vision, LED, speaker, SD card
+  live [--4k] [--player [mpv|ffplay]] [--listen 127.0.0.1:0] [--no-open]
+                                   Open live web console (with PTZ/controls) or local RTSP player
   snap [-o out.jpg] [--hq] [--zoom 1..5]
                                    Capture a JPEG frame over RTSP
   record [-d 5] [--hq] [-o clip.mkv]
@@ -1238,7 +1374,6 @@ Camera Commands (target any profile via -c <name>):
   recordings <dates [YYYY-MM] | list [YYYY-MM-DD] | download --from ... --to ...>
                                    Query or download SD card recordings
   raw '<json>'                     Execute a raw /stok=.../ds JSON request
-  mcp                              Start MCP stdio JSON-RPC 2.0 server (supports multi-camera)
 
 Global Flags:
   -c, --camera <name>              Select named camera profile
@@ -1246,14 +1381,16 @@ Global Flags:
   -u, --user <username>            Camera username (default: admin)
       --password-file <path>       Read camera password from file
       --password-stdin             Read camera password from stdin
+  -x, --proxy <spec>               Tunnel via SSH host, ssh://, socks5://, http://, or direct
+      --ssh <user@host[:port]>     Shorthand for --proxy ssh://<user@host[:port]>
       --http-port <port>           Override HTTP control port (default: 80)
       --rtsp-port <port>           Override RTSP/MULTITRANS port (default: 554)
       --onvif-port <port>          Override ONVIF port (default: 2020)
       --json                       Emit machine-readable JSON output
 
 Environment Variables:
-  Single camera:  IPC_CAMERA, IPC_HOST, IPC_USER, IPC_PASSWORD, IPC_PASSWORD_FILE
-  Multi-camera:   IPC_CAMERAS (JSON map) and/or IPC_HOST_<NAME>, IPC_USER_<NAME>, IPC_PASSWORD_<NAME>
-  Media dirs:     IPC_MEDIA_DIR, IPC_AUDIO_DIR
+  Single camera:  IPC_CAMERA, IPC_HOST, IPC_USER, IPC_PASSWORD, IPC_PASSWORD_FILE, IPC_PROXY, IPC_SSH
+  Multi-camera:   IPC_CAMERAS (JSON map) and/or IPC_HOST_<NAME>, IPC_USER_<NAME>, IPC_PASSWORD_<NAME>, IPC_PROXY_<NAME>
+  Media dir:      IPC_MEDIA_DIR
 `)
 }

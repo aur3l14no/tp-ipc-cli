@@ -1,9 +1,8 @@
 # tp-ipc
 
-Local CLI and multi-camera [MCP](https://modelcontextprotocol.io) server for
-mainland China **TP-LINK `TL-IPC`** cameras (`TL-IPC48AW`, `TL-IPC48AW-PLUS`,
-and compatible `TL-IPC` models). Runs as a single static binary on macOS and
-Linux (`arm64` and `x86_64`). MIT licensed.
+Local multi-camera CLI for mainland China **TP-LINK `TL-IPC`** cameras
+(`TL-IPC48AW`, `TL-IPC48AW-PLUS`, and compatible `TL-IPC` models). Runs as a
+single static binary on macOS and Linux (`arm64` and `x86_64`). MIT licensed.
 
 Mainland China TP-LINK `TL-IPC` cameras run a different local firmware stack
 from international Tapo cameras (`pytapo` and Tapo cloud clients cannot talk to
@@ -32,16 +31,25 @@ RTSP 4K:   rtsp://admin:***@192.168.1.60:554/stream1
 RTSP Sub:  rtsp://admin:***@192.168.1.60:554/stream2
 ```
 
-Pass `-c <camera>` to target any configured profile, and `--json` on any command
-for machine-readable output:
+Pass `-c <camera>` to target any configured profile, `--proxy <ssh-host>` (or
+`--ssh <user@host>`) to tunnel all HTTP, ONVIF, RTSP, and `MULTITRANS` traffic
+through a remote SSH host (honoring `~/.ssh/config`), and `--json` on any
+command for machine-readable output:
 
 ```sh
 tp-ipc -c door status --json
+tp-ipc --proxy home-nas discover --cidr 192.168.1.0/24
+tp-ipc --proxy home-nas -c desk live      # Tunnel live web console & RTSP via SSH
+tp-ipc camera add cabin --host 192.168.2.60 --proxy cabin-box
 ```
 
-### Snapshots, live clips, and speaker talkback
+### Live preview, snapshots, clips, and speaker talkback
 
 ```sh
+tp-ipc live                               # Open local web console (live video + PTZ + controls)
+tp-ipc live --4k --listen 127.0.0.1:8787  # Start on 4K stream at a fixed loopback port
+tp-ipc live --player                      # Open ultra-low-latency RTSP in mpv/ffplay/IINA/VLC
+
 tp-ipc snap -o desk.jpg                   # Fast sub-stream JPEG (640x360)
 tp-ipc snap --4k -o desk-4k.jpg           # Full 3840x2160 frame
 tp-ipc snap --zoom 3 -o zoom.jpg          # 3x digital crop from the 4K stream
@@ -86,36 +94,6 @@ tp-ipc volume 70
 tp-ipc events --wait 5                    # Poll ONVIF motion/tamper events
 ```
 
-### Multi-camera MCP server (`stdio`)
-
-One `tp-ipc mcp` process serves all configured cameras over `stdio`, caching
-independent login sessions per camera. Add it to Claude Desktop, Claude Code,
-Codex, or any MCP client:
-
-```json
-{
-  "mcpServers": {
-    "tp-ipc": {
-      "command": "/usr/local/bin/tp-ipc",
-      "args": ["mcp"],
-      "env": {
-        "IPC_CAMERA": "desk",
-        "IPC_HOST_DESK": "192.168.1.60",
-        "IPC_PASSWORD_DESK": "your-desk-camera-password",
-        "IPC_HOST_DOOR": "192.168.1.61",
-        "IPC_PASSWORD_DOOR": "your-door-camera-password",
-        "IPC_MEDIA_DIR": "/tmp/ipc-media",
-        "IPC_AUDIO_DIR": "/tmp/ipc-audio"
-      }
-    }
-  }
-}
-```
-
-If you already saved profiles with `tp-ipc camera add`, `env` only needs
-`IPC_MEDIA_DIR` (for `camera_record_clip` and `camera_download_recording`) and
-`IPC_AUDIO_DIR` (for `camera_play_audio`).
-
 ## Install
 
 **Prebuilt static binary** (macOS & Linux, `arm64` & `amd64`):
@@ -134,9 +112,9 @@ CGO_ENABLED=0 go install github.com/aur3l14no/tp-ipc-cli/cmd/tp-ipc@latest
 ```
 
 **Runtime dependency**: `ffmpeg` on `PATH` is required only for media commands
-(`snap`, `record`, `export` / `recordings download`, and `play-audio`, plus
-their MCP equivalents). Discovery, status, PTZ, presets, detectors, alarms,
-events, and SD recording index queries require no external tools.
+(`live`, `snap`, `record`, `export` / `recordings download`, and `play-audio`).
+Discovery, status, PTZ, presets, detectors, alarms, events, and SD recording
+index queries require no external tools.
 
 ## Configuration
 
@@ -150,11 +128,11 @@ environment variables or global flags instead of writing a config file:
 
 | Source | Variables / Flags | Purpose |
 | --- | --- | --- |
-| Global flags | `-c`/`--camera`, `-H`/`--host`, `-u`/`--user`, `--password-stdin`, `--password-file`, `--http-port`, `--rtsp-port`, `--onvif-port`, `--json` | Per-invocation target, port overrides (defaults `80` / `554` / `2020`), and JSON output |
-| Indexed multi-camera env | `IPC_HOST_<NAME>`, `IPC_USER_<NAME>`, `IPC_PASSWORD_<NAME>`, `IPC_PASSWORD_FILE_<NAME>`, `IPC_HTTP_PORT_<NAME>`, `IPC_RTSP_PORT_<NAME>`, `IPC_ONVIF_PORT_<NAME>` | Define or override named camera `<name>` (case-insensitive, `-`/`.` mapped to `_`) |
-| JSON multi-camera env | `IPC_CAMERAS` | JSON map of profiles, e.g. `{"desk":{"host":"192.168.1.60"}}` |
-| Default / single camera env | `IPC_CAMERA`, `IPC_HOST`, `IPC_USER`, `IPC_PASSWORD`, `IPC_PASSWORD_FILE` | Select default profile (`IPC_CAMERA`) or configure a single unnamed camera |
-| Media directories | `IPC_MEDIA_DIR`, `IPC_AUDIO_DIR` | Output directory for recorded/exported clips and input directory for `camera_play_audio` |
+| Global flags | `-c`/`--camera`, `-H`/`--host`, `-u`/`--user`, `--password-stdin`, `--password-file`, `-x`/`--proxy`, `--ssh`, `--http-port`, `--rtsp-port`, `--onvif-port`, `--json` | Per-invocation target, SSH/SOCKS5/HTTP proxy (`--proxy direct` bypasses saved proxy), port overrides, and JSON output |
+| Indexed multi-camera env | `IPC_HOST_<NAME>`, `IPC_USER_<NAME>`, `IPC_PASSWORD_<NAME>`, `IPC_PASSWORD_FILE_<NAME>`, `IPC_PROXY_<NAME>`, `IPC_SSH_<NAME>`, `IPC_HTTP_PORT_<NAME>`, `IPC_RTSP_PORT_<NAME>`, `IPC_ONVIF_PORT_<NAME>` | Define or override named camera `<name>` (case-insensitive, `-`/`.` mapped to `_`) |
+| JSON multi-camera env | `IPC_CAMERAS` | JSON map of profiles, e.g. `{"desk":{"host":"192.168.1.60","proxy":"ssh://home-nas"}}` |
+| Default / single camera env | `IPC_CAMERA`, `IPC_HOST`, `IPC_USER`, `IPC_PASSWORD`, `IPC_PASSWORD_FILE`, `IPC_PROXY`, `IPC_SSH` | Select default profile (`IPC_CAMERA`) or configure a single unnamed camera |
+| Media directory | `IPC_MEDIA_DIR` | Default output directory for recorded and exported clips when `-o` is omitted |
 
 ## Reference
 
@@ -169,6 +147,7 @@ environment variables or global flags instead of writing a config file:
 | `check` | Verify login and print model, firmware, RTSP URLs, and ONVIF endpoint |
 | `info` | Read model, hardware/firmware version, MAC address, and local capability flags |
 | `status` | Read detectors, privacy mask, night vision, tracking, LED, speaker volume, and SD card space |
+| `live [--hq\|--4k] [--listen 127.0.0.1:0] [--port PORT] [--no-open] [--player [auto\|mpv\|ffplay\|iina\|vlc]]` | Open built-in live web console (fMP4 video + PTZ + privacy/night-vision/preset controls) or launch a local RTSP player |
 | `snap [-o out.jpg] [--hq\|--4k] [--zoom 1..5] [--focus-x 0.5] [--focus-y 0.5]` | Capture a JPEG frame (`-o -` writes raw JPEG bytes to stdout) |
 | `record [-d 5] [--hq\|--4k] [-o clip.mkv]` | Record a `1`–`300`s live RTSP clip without video transcoding (`.mkv` or `.mp4`) |
 | `export --from <start> --to <end> [--date YYYY-MM-DD] [-o out.mp4]` | Export historical SD card video + audio across a time range (`HH:MM`, `HH:MM:SS`, datetime, or RFC3339) |
@@ -186,23 +165,6 @@ environment variables or global flags instead of writing a config file:
 | `events [--wait 1..15]` | Poll ONVIF PullPoint motion and tamper notifications |
 | `watch-person [--wait 1..30]` | Wait silently for person-detection white-light linkage and restore prior settings |
 | `raw '<json>'` | Execute a raw `/stok=<token>/ds` JSON payload |
-| `mcp` | Run the MCP JSON-RPC 2.0 server over `stdio` |
-
-### MCP tools (29)
-
-`camera_list` and `camera_discover` operate globally; all other 27 tools accept
-an optional `"camera": "<profile-name>"` property and use the default camera
-when omitted.
-
-| Category | Tools |
-| --- | --- |
-| Discovery & inventory | `camera_list`, `camera_discover` |
-| Inspection | `camera_activation_status`, `camera_info`, `camera_status` |
-| Live media & talkback | `camera_snapshot`, `camera_record_clip`, `camera_play_audio` |
-| SD card playback | `camera_recording_dates`, `camera_recordings`, `camera_download_recording` |
-| Pan/tilt & presets | `camera_ptz_status`, `camera_move`, `camera_go_to_position`, `camera_ptz_stop`, `camera_presets`, `camera_save_preset`, `camera_go_to_preset`, `camera_remove_preset` |
-| Controls & alarms | `camera_set_privacy`, `camera_set_led`, `camera_set_speaker_volume`, `camera_set_tracking`, `camera_set_detection`, `camera_set_night_vision`, `camera_alarm`, `camera_stop_alarm` |
-| Events | `camera_events`, `camera_person_alarm` |
 
 ## Tested Hardware
 
