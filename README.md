@@ -128,10 +128,10 @@ environment variables or global flags instead of writing a config file:
 
 | Source | Variables / Flags | Purpose |
 | --- | --- | --- |
-| Global flags | `-c`/`--camera`, `-H`/`--host`, `-u`/`--user`, `--password-stdin`, `--password-file`, `-x`/`--proxy`, `--ssh`, `--http-port`, `--rtsp-port`, `--onvif-port`, `--json` | Per-invocation target, SSH/SOCKS5/HTTP proxy (`--proxy direct` bypasses saved proxy), port overrides, and JSON output |
-| Indexed multi-camera env | `IPC_HOST_<NAME>`, `IPC_USER_<NAME>`, `IPC_PASSWORD_<NAME>`, `IPC_PASSWORD_FILE_<NAME>`, `IPC_PROXY_<NAME>`, `IPC_SSH_<NAME>`, `IPC_HTTP_PORT_<NAME>`, `IPC_RTSP_PORT_<NAME>`, `IPC_ONVIF_PORT_<NAME>` | Define or override named camera `<name>` (case-insensitive, `-`/`.` mapped to `_`) |
-| JSON multi-camera env | `IPC_CAMERAS` | JSON map of profiles, e.g. `{"desk":{"host":"192.168.1.60","proxy":"ssh://home-nas"}}` |
-| Default / single camera env | `IPC_CAMERA`, `IPC_HOST`, `IPC_USER`, `IPC_PASSWORD`, `IPC_PASSWORD_FILE`, `IPC_PROXY`, `IPC_SSH` | Select default profile (`IPC_CAMERA`) or configure a single unnamed camera |
+| Global flags | `-c`/`--camera`, `-H`/`--host`, `-u`/`--user`, `--password-stdin`, `--password-file`, `-x`/`--proxy`, `--ssh`, `--http-port`, `--rtsp-port`, `--onvif-port`, `--invert-pan`, `--invert-tilt`, `--json` | Per-invocation target, SSH/SOCKS5/HTTP proxy (`--proxy direct` bypasses saved proxy), port overrides, PTZ axis inversion, and JSON output |
+| Indexed multi-camera env | `IPC_HOST_<NAME>`, `IPC_USER_<NAME>`, `IPC_PASSWORD_<NAME>`, `IPC_PASSWORD_FILE_<NAME>`, `IPC_PROXY_<NAME>`, `IPC_SSH_<NAME>`, `IPC_HTTP_PORT_<NAME>`, `IPC_RTSP_PORT_<NAME>`, `IPC_ONVIF_PORT_<NAME>`, `IPC_INVERT_PAN_<NAME>`, `IPC_INVERT_TILT_<NAME>` | Define or override named camera `<name>` (case-insensitive, `-`/`.` mapped to `_`) |
+| JSON multi-camera env | `IPC_CAMERAS` | JSON map of profiles, e.g. `{"desk":{"host":"192.168.1.60","proxy":"ssh://home-nas","invert_pan":true}}` |
+| Default / single camera env | `IPC_CAMERA`, `IPC_HOST`, `IPC_USER`, `IPC_PASSWORD`, `IPC_PASSWORD_FILE`, `IPC_PROXY`, `IPC_SSH`, `IPC_INVERT_PAN`, `IPC_INVERT_TILT` | Select default profile (`IPC_CAMERA`) or configure a single unnamed camera |
 | Media directory | `IPC_MEDIA_DIR` | Default output directory for recorded and exported clips when `-o` is omitted |
 
 ## Reference

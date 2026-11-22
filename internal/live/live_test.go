@@ -145,8 +145,10 @@ func TestServerSecurityAndStreamHVC1Fallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	argsLog := filepath.Join(tmp, "ffmpeg_args.log")
 	fakeFFmpeg := filepath.Join(tmp, "ffmpeg")
 	script := `#!/bin/sh
+printf '%s\n' "$*" >> "` + argsLog + `"
 for arg in "$@"; do
   if [ "$arg" = "hvc1" ]; then
     echo "[mp4 @ 0x0] Tag hvc1 incompatible with output codec id '27' (avc1)" >&2
@@ -315,6 +317,50 @@ sleep 1
 	}
 	if !bytes.Contains(gotBytes, []byte("KEYFRAME_PAYLOAD")) || !bytes.Contains(gotBytes, []byte("PFRAME_PAYLOAD")) {
 		t.Fatal("missing expected fMP4 fragment payloads")
+	}
+	loggedArgs, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read ffmpeg args log: %v", err)
+	}
+	if !strings.Contains(string(loggedArgs), "filter_units=remove_types=0") {
+		t.Fatalf("expected H.264 copy retry to strip type-0 NALs via filter_units=remove_types=0, got args:\n%s", string(loggedArgs))
+	}
+	if !strings.Contains(string(loggedArgs), "aresample=async=1:first_pts=0") {
+		t.Fatalf("expected aresample audio timestamp filter in ffmpeg args, got:\n%s", string(loggedArgs))
+	}
+
+	// 6. /api/control ptz_invert updates runtime inversion and persists to config.json
+	reqInv, _ := http.NewRequest(http.MethodPost, baseURL+"/api/control", strings.NewReader(`{"camera":"door","target":"ptz_invert","invert_pan":true}`))
+	reqInv.AddCookie(cookies[0])
+	reqInv.Header.Set("X-Requested-With", "tp-ipc")
+	respInv, err := http.DefaultClient.Do(reqInv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invBody struct {
+		OK        bool            `json:"ok"`
+		Persisted bool            `json:"persisted"`
+		PTZConfig map[string]bool `json:"ptz_config"`
+	}
+	_ = json.NewDecoder(respInv.Body).Decode(&invBody)
+	respInv.Body.Close()
+	if respInv.StatusCode != http.StatusOK || !invBody.OK || !invBody.Persisted || !invBody.PTZConfig["invert_pan"] {
+		t.Fatalf("unexpected ptz_invert response (HTTP %d): %+v", respInv.StatusCode, invBody)
+	}
+
+	reqState, _ := http.NewRequest(http.MethodGet, baseURL+"/api/state?camera=door", nil)
+	reqState.AddCookie(cookies[0])
+	respState, err := http.DefaultClient.Do(reqState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stateBody struct {
+		PTZConfig map[string]bool `json:"ptz_config"`
+	}
+	_ = json.NewDecoder(respState.Body).Decode(&stateBody)
+	respState.Body.Close()
+	if respState.StatusCode != http.StatusOK || !stateBody.PTZConfig["invert_pan"] || stateBody.PTZConfig["invert_tilt"] {
+		t.Fatalf("expected /api/state ptz_config invert_pan=true invert_tilt=false, got %+v", stateBody.PTZConfig)
 	}
 }
 

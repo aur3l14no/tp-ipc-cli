@@ -240,6 +240,14 @@ func (c *Client) PTZMoveRelative(ctx context.Context, pan, tilt float64) error {
 		return errors.New("at least one of pan or tilt must be non-zero")
 	}
 
+	invertPan, invertTilt := c.PTZInvert()
+	if invertPan {
+		pan = -pan
+	}
+	if invertTilt {
+		tilt = -tilt
+	}
+
 	body := fmt.Sprintf(
 		`<tptz:RelativeMove><tptz:ProfileToken>%s</tptz:ProfileToken><tptz:Translation><tt:PanTilt x="%.6f" y="%.6f"/></tptz:Translation></tptz:RelativeMove>`,
 		onvifProfileToken, pan, tilt,

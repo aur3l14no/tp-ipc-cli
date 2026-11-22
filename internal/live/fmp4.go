@@ -19,8 +19,8 @@ import (
 const (
 	maxMP4BoxBytes     = 32 * 1024 * 1024
 	maxGOPCacheBytes   = 16 * 1024 * 1024
-	maxGOPCacheFrags   = 60
-	subscriberQueueLen = 64
+	maxGOPCacheFrags   = 150
+	subscriberQueueLen = 192
 	streamIdleGrace    = 3 * time.Second
 )
 
@@ -523,6 +523,10 @@ func (s *streamSession) buildFFmpegArgs(rtspURL string, tagHVC1 bool) []string {
 		args = append(args, "-c:v", "copy")
 		if tagHVC1 {
 			args = append(args, "-tag:v", "hvc1")
+		} else {
+			// Strip degenerate type-0 / trailing-zero NALs emitted by some TL-IPC H.264 streams
+			// that otherwise become 0-length AVCC units rejected by Chromium MSE.
+			args = append(args, "-bsf:v", "filter_units=remove_types=0")
 		}
 	}
 	args = append(args,
@@ -530,6 +534,7 @@ func (s *streamSession) buildFFmpegArgs(rtspURL string, tagHVC1 bool) []string {
 		"-ar", "16000",
 		"-ac", "1",
 		"-b:a", "32k",
+		"-af", "aresample=async=1:first_pts=0",
 		"-frag_duration", "100000",
 		"-movflags", "empty_moov+default_base_moof+skip_trailer",
 		"-flush_packets", "1",

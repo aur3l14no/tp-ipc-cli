@@ -437,6 +437,13 @@
             <button type="button" data-step="0.15">大幅</button>
           </div>
         </div>
+        <div class="ptz-meta" style="margin-top:8px">
+          <span>方向反转</span>
+          <div style="display:flex;gap:6px">
+            <button id="invPanBtn" type="button" class="btn" style="padding:4px 8px;font-size:11px">左右反转</button>
+            <button id="invTiltBtn" type="button" class="btn" style="padding:4px 8px;font-size:11px">上下反转</button>
+          </div>
+        </div>
         <div class="kbd-hint">快捷键：WASD / 方向键转动，Space 停止，M 声音，P 抓拍，F 全屏</div>
       </div>
 
@@ -534,6 +541,8 @@
     codecMode: 'copy',
     ptzStep: 0.05,
     ptzBusy: false,
+    invertPan: false,
+    invertTilt: false,
     privacyMasked: false,
     forceWhenMasked: false,
     streamEpoch: 0,
@@ -689,11 +698,35 @@
     $('codecBadge').textContent = shortCodec;
 
     const ms = new MSE();
+    let failed = false;
+    const failStream = (err, title) => {
+      if (epoch !== state.streamEpoch || failed) return;
+      failed = true;
+      ctrl.abort();
+      if (state.lagTimer) {
+        clearInterval(state.lagTimer);
+        state.lagTimer = null;
+      }
+      const mediaErr = video.error;
+      const detail = (mediaErr && mediaErr.message)
+        || (err && err.message)
+        || (mediaErr ? `MEDIA_ERR_${mediaErr.code}` : String(err || '未知解码异常'));
+      if (codec === 'copy') {
+        state.codecMode = 'h264';
+        showToast('直通流解码异常，已自动切换为 H.264 兼容流');
+        startStream('h264');
+        return;
+      }
+      setDot('error');
+      showStatusOverlay(title || '视频流解码异常', detail, true);
+    };
+
+    video.addEventListener('error', () => failStream(null, '视频流解码异常'), { signal: ctrl.signal });
     state.objectURL = URL.createObjectURL(ms);
     video.src = state.objectURL;
 
     ms.addEventListener('sourceopen', async () => {
-      if (epoch !== state.streamEpoch) return;
+      if (epoch !== state.streamEpoch || failed) return;
       let sb;
       try {
         sb = ms.addSourceBuffer(supportedMime);
@@ -710,11 +743,17 @@
         return;
       }
 
+      sb.addEventListener('error', () => failStream(null, '视频流缓冲异常'));
+
       const queue = [];
       let firstFrameShown = false;
 
       const pump = () => {
-        if (epoch !== state.streamEpoch || !sb || sb.updating) return;
+        if (epoch !== state.streamEpoch || failed || !sb || sb.updating) return;
+        if (video.error || ms.readyState !== 'open') {
+          failStream(null, '视频流解码异常');
+          return;
+        }
         if (queue.length === 0) {
           // Trim old buffer (>18s behind playback head) so memory stays flat indefinitely
           try {
@@ -744,15 +783,16 @@
         try {
           sb.appendBuffer(chunk);
         } catch (err) {
-          if (epoch === state.streamEpoch) {
-            setDot('error');
-            showStatusOverlay('视频流缓冲异常', err.message || String(err), true);
-          }
+          failStream(err, '视频流缓冲异常');
         }
       };
 
       sb.addEventListener('updateend', () => {
-        if (epoch !== state.streamEpoch) return;
+        if (epoch !== state.streamEpoch || failed) return;
+        if (video.error) {
+          failStream(null, '视频流解码异常');
+          return;
+        }
         if (!firstFrameShown && sb.buffered.length > 0) {
           firstFrameShown = true;
           const end = sb.buffered.end(sb.buffered.length - 1);
@@ -767,7 +807,7 @@
       });
 
       state.lagTimer = setInterval(() => {
-        if (epoch !== state.streamEpoch || !sb || sb.buffered.length === 0) return;
+        if (epoch !== state.streamEpoch || failed || !sb || video.error || ms.readyState !== 'open' || sb.buffered.length === 0) return;
         const end = sb.buffered.end(sb.buffered.length - 1);
         const lag = Math.max(0, end - video.currentTime);
         const badge = $('latencyBadge');
@@ -789,18 +829,18 @@
       try {
         while (true) {
           const { done, value } = await reader.read();
-          if (done || epoch !== state.streamEpoch) break;
+          if (done || epoch !== state.streamEpoch || failed) break;
           if (value && value.byteLength > 0) {
             queue.push(value);
             pump();
           }
         }
-        if (epoch === state.streamEpoch && !ctrl.signal.aborted) {
+        if (epoch === state.streamEpoch && !failed && !ctrl.signal.aborted) {
           setDot('error');
           showStatusOverlay('实时流已断开', '摄像头连接中断，点击重试恢复预览', true);
         }
       } catch (err) {
-        if (epoch === state.streamEpoch && !ctrl.signal.aborted) {
+        if (epoch === state.streamEpoch && !failed && !ctrl.signal.aborted) {
           setDot('error');
           showStatusOverlay('实时流读取中断', err.message || String(err), true);
         }
@@ -881,6 +921,12 @@
     } else {
       $('ptzCoords').textContent = '';
     }
+
+    const ptzCfg = data.ptz_config || {};
+    state.invertPan = Boolean(ptzCfg.invert_pan);
+    state.invertTilt = Boolean(ptzCfg.invert_tilt);
+    $('invPanBtn').classList.toggle('primary', state.invertPan);
+    $('invTiltBtn').classList.toggle('primary', state.invertTilt);
 
     const wasMasked = state.privacyMasked;
     state.privacyMasked = isOn(st.privacy);
@@ -983,6 +1029,7 @@
     const setQuality = (q) => {
       if (state.quality === q) return;
       state.quality = q;
+      state.codecMode = 'copy';
       $('qSubBtn').classList.toggle('active', q === 'sub');
       $('qMainBtn').classList.toggle('active', q === 'main');
       startStream();
@@ -1042,6 +1089,31 @@
         for (const b of $('stepSeg').querySelectorAll('button')) b.classList.toggle('active', b === btn);
       });
     }
+
+    const togglePTZInvert = async (axis) => {
+      const nextPan = axis === 'pan' ? !state.invertPan : state.invertPan;
+      const nextTilt = axis === 'tilt' ? !state.invertTilt : state.invertTilt;
+      try {
+        const res = await apiPost('/api/control', {
+          camera: state.camera,
+          target: 'ptz_invert',
+          invert_pan: nextPan,
+          invert_tilt: nextTilt,
+        });
+        const cfg = res.ptz_config || { invert_pan: nextPan, invert_tilt: nextTilt };
+        state.invertPan = Boolean(cfg.invert_pan);
+        state.invertTilt = Boolean(cfg.invert_tilt);
+        $('invPanBtn').classList.toggle('primary', state.invertPan);
+        $('invTiltBtn').classList.toggle('primary', state.invertTilt);
+        const label = axis === 'pan' ? '左右反转' : '上下反转';
+        const enabled = axis === 'pan' ? state.invertPan : state.invertTilt;
+        showToast(`${label}已${enabled ? '开启' : '关闭'}`);
+      } catch (err) {
+        showToast(`设置方向反转失败：${err.message}`);
+      }
+    };
+    $('invPanBtn').addEventListener('click', () => togglePTZInvert('pan'));
+    $('invTiltBtn').addEventListener('click', () => togglePTZInvert('tilt'));
 
     $('presetForm').addEventListener('submit', async (e) => {
       e.preventDefault();

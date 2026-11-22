@@ -26,16 +26,18 @@ const (
 )
 
 type Settings struct {
-	Name      string `json:"-"`
-	Scheme    string `json:"scheme,omitempty"`
-	Host      string `json:"host"`
-	HTTPPort  int    `json:"http_port,omitempty"`
-	RTSPPort  int    `json:"rtsp_port,omitempty"`
-	ONVIFPort int    `json:"onvif_port,omitempty"`
-	User      string `json:"user"`
-	Password  string `json:"password,omitempty"`
-	Proxy     string `json:"proxy,omitempty"`
-	MediaDir  string `json:"media_dir,omitempty"`
+	Name       string `json:"-"`
+	Scheme     string `json:"scheme,omitempty"`
+	Host       string `json:"host"`
+	HTTPPort   int    `json:"http_port,omitempty"`
+	RTSPPort   int    `json:"rtsp_port,omitempty"`
+	ONVIFPort  int    `json:"onvif_port,omitempty"`
+	User       string `json:"user"`
+	Password   string `json:"password,omitempty"`
+	Proxy      string `json:"proxy,omitempty"`
+	MediaDir   string `json:"media_dir,omitempty"`
+	InvertPan  bool   `json:"invert_pan,omitempty"`
+	InvertTilt bool   `json:"invert_tilt,omitempty"`
 }
 
 // Store represents the multi-camera configuration file (~/.config/tp-ipc/config.json).
@@ -46,14 +48,16 @@ type Store struct {
 	Cameras       map[string]Settings `json:"cameras,omitempty"`
 
 	// Legacy flat single-camera fields (migrated into Cameras["default"] on load)
-	Scheme    string `json:"scheme,omitempty"`
-	Host      string `json:"host,omitempty"`
-	HTTPPort  int    `json:"http_port,omitempty"`
-	RTSPPort  int    `json:"rtsp_port,omitempty"`
-	ONVIFPort int    `json:"onvif_port,omitempty"`
-	User      string `json:"user,omitempty"`
-	Password  string `json:"password,omitempty"`
-	Proxy     string `json:"proxy,omitempty"`
+	Scheme     string `json:"scheme,omitempty"`
+	Host       string `json:"host,omitempty"`
+	HTTPPort   int    `json:"http_port,omitempty"`
+	RTSPPort   int    `json:"rtsp_port,omitempty"`
+	ONVIFPort  int    `json:"onvif_port,omitempty"`
+	User       string `json:"user,omitempty"`
+	Password   string `json:"password,omitempty"`
+	Proxy      string `json:"proxy,omitempty"`
+	InvertPan  bool   `json:"invert_pan,omitempty"`
+	InvertTilt bool   `json:"invert_tilt,omitempty"`
 }
 
 type Overrides struct {
@@ -66,6 +70,8 @@ type Overrides struct {
 	RTSPPort      int
 	ONVIFPort     int
 	Proxy         string
+	InvertPan     *bool
+	InvertTilt    *bool
 	Stdin         io.Reader
 }
 
@@ -80,6 +86,8 @@ type CameraSummary struct {
 	User        string `json:"user"`
 	HasPassword bool   `json:"has_password"`
 	Proxy       string `json:"proxy,omitempty"`
+	InvertPan   bool   `json:"invert_pan,omitempty"`
+	InvertTilt  bool   `json:"invert_tilt,omitempty"`
 	Source      string `json:"source,omitempty"`
 }
 
@@ -241,20 +249,23 @@ func LoadStore() (Store, error) {
 			// Migrate legacy flat config into "default" profile transparently
 			if st.Host != "" && len(st.Cameras) == 0 {
 				st.Cameras["default"] = Settings{
-					Scheme:    st.Scheme,
-					Host:      st.Host,
-					HTTPPort:  st.HTTPPort,
-					RTSPPort:  st.RTSPPort,
-					ONVIFPort: st.ONVIFPort,
-					User:      st.User,
-					Password:  st.Password,
-					Proxy:     st.Proxy,
+					Scheme:     st.Scheme,
+					Host:       st.Host,
+					HTTPPort:   st.HTTPPort,
+					RTSPPort:   st.RTSPPort,
+					ONVIFPort:  st.ONVIFPort,
+					User:       st.User,
+					Password:   st.Password,
+					Proxy:      st.Proxy,
+					InvertPan:  st.InvertPan,
+					InvertTilt: st.InvertTilt,
 				}
 				if st.DefaultCamera == "" {
 					st.DefaultCamera = "default"
 				}
 				st.Scheme, st.Host, st.User, st.Password, st.Proxy = "", "", "", "", ""
 				st.HTTPPort, st.RTSPPort, st.ONVIFPort = 0, 0, 0
+				st.InvertPan, st.InvertTilt = false, false
 			}
 		}
 	}
@@ -383,6 +394,8 @@ func applyIndexedEnvVars(st *Store) {
 				cam.Proxy = v
 			}
 		}
+		_ = applyEnvBool("IPC_INVERT_PAN_"+sfx, &cam.InvertPan)
+		_ = applyEnvBool("IPC_INVERT_TILT_"+sfx, &cam.InvertTilt)
 		st.Cameras[name] = cam
 	}
 }
@@ -416,6 +429,8 @@ func (st Store) Summaries() []CameraSummary {
 			User:        c.User,
 			HasPassword: c.Password != "",
 			Proxy:       c.RedactedProxy(),
+			InvertPan:   c.InvertPan,
+			InvertTilt:  c.InvertTilt,
 		})
 	}
 	return out
@@ -514,6 +529,12 @@ func Load(ov Overrides) (Settings, error) {
 			return s, err
 		}
 	}
+	if err := applyEnvBool("IPC_INVERT_PAN", &s.InvertPan); err != nil {
+		return s, err
+	}
+	if err := applyEnvBool("IPC_INVERT_TILT", &s.InvertTilt); err != nil {
+		return s, err
+	}
 
 	if strings.TrimSpace(ov.Host) != "" {
 		if err := applyHost(&s, ov.Host); err != nil {
@@ -536,6 +557,12 @@ func Load(ov Overrides) (Settings, error) {
 		if err := applyProxy(&s, ov.Proxy); err != nil {
 			return s, err
 		}
+	}
+	if ov.InvertPan != nil {
+		s.InvertPan = *ov.InvertPan
+	}
+	if ov.InvertTilt != nil {
+		s.InvertTilt = *ov.InvertTilt
 	}
 	if strings.TrimSpace(ov.PasswordFile) != "" {
 		pw, err := readFirstLineFile(ov.PasswordFile)
@@ -640,6 +667,12 @@ func LoadForConfigure(ov Overrides) (Settings, error) {
 					return s, err
 				}
 			}
+			if err := applyEnvBool("IPC_INVERT_PAN_"+sfx, &s.InvertPan); err != nil {
+				return s, err
+			}
+			if err := applyEnvBool("IPC_INVERT_TILT_"+sfx, &s.InvertTilt); err != nil {
+				return s, err
+			}
 		}
 	} else {
 		if defEnv := strings.TrimSpace(os.Getenv("IPC_CAMERA")); defEnv != "" {
@@ -693,6 +726,12 @@ func LoadForConfigure(ov Overrides) (Settings, error) {
 			return s, err
 		}
 	}
+	if err := applyEnvBool("IPC_INVERT_PAN", &s.InvertPan); err != nil {
+		return s, err
+	}
+	if err := applyEnvBool("IPC_INVERT_TILT", &s.InvertTilt); err != nil {
+		return s, err
+	}
 
 	if strings.TrimSpace(ov.Host) != "" {
 		if err := applyHost(&s, ov.Host); err != nil {
@@ -715,6 +754,12 @@ func LoadForConfigure(ov Overrides) (Settings, error) {
 		if err := applyProxy(&s, ov.Proxy); err != nil {
 			return s, err
 		}
+	}
+	if ov.InvertPan != nil {
+		s.InvertPan = *ov.InvertPan
+	}
+	if ov.InvertTilt != nil {
+		s.InvertTilt = *ov.InvertTilt
 	}
 	if strings.TrimSpace(ov.PasswordFile) != "" {
 		pw, err := readFirstLineFile(ov.PasswordFile)
@@ -763,6 +808,7 @@ func SaveStore(st Store) (string, error) {
 	// Clear legacy flat fields before persisting
 	st.Scheme, st.Host, st.User, st.Password, st.Proxy = "", "", "", "", ""
 	st.HTTPPort, st.RTSPPort, st.ONVIFPort = 0, 0, 0
+	st.InvertPan, st.InvertTilt = false, false
 
 	tmp, err := os.CreateTemp(dir, ".config-*.json")
 	if err != nil {
@@ -925,6 +971,71 @@ func applySaved(dst *Settings, saved Settings) {
 	if saved.MediaDir != "" {
 		dst.MediaDir = saved.MediaDir
 	}
+	if saved.InvertPan {
+		dst.InvertPan = true
+	}
+	if saved.InvertTilt {
+		dst.InvertTilt = true
+	}
+}
+
+// UpdateCameraPTZInvert updates invert_pan/invert_tilt on a saved profile in config.json without merging env vars into disk.
+func UpdateCameraPTZInvert(cameraName string, invertPan, invertTilt bool) (bool, error) {
+	path, err := ConfigPath()
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("config %s must be a regular file", path)
+	}
+	if runtime.GOOS != "windows" && (info.Mode().Perm()&0o077) != 0 {
+		return false, fmt.Errorf("config %s has insecure permissions %04o (expected 0600)", path, info.Mode().Perm())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	var st Store
+	if err := json.Unmarshal(data, &st); err != nil {
+		return false, err
+	}
+	if st.Cameras == nil && st.Host != "" {
+		st.Cameras = map[string]Settings{
+			"default": {
+				Scheme:     st.Scheme,
+				Host:       st.Host,
+				HTTPPort:   st.HTTPPort,
+				RTSPPort:   st.RTSPPort,
+				ONVIFPort:  st.ONVIFPort,
+				User:       st.User,
+				Password:   st.Password,
+				Proxy:      st.Proxy,
+				InvertPan:  st.InvertPan,
+				InvertTilt: st.InvertTilt,
+			},
+		}
+		if st.DefaultCamera == "" {
+			st.DefaultCamera = "default"
+		}
+	}
+	cam, ok := st.Cameras[cameraName]
+	if !ok {
+		return false, nil
+	}
+	cam.InvertPan = invertPan
+	cam.InvertTilt = invertTilt
+	st.Cameras[cameraName] = cam
+	if _, err := SaveStore(st); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func applyProxy(dst *Settings, raw string) error {
@@ -970,6 +1081,23 @@ func applyEnvPort(envName string, dst *int) error {
 	}
 	*dst = n
 	return nil
+}
+
+func applyEnvBool(envName string, dst *bool) error {
+	v := strings.TrimSpace(os.Getenv(envName))
+	if v == "" {
+		return nil
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "on", "yes":
+		*dst = true
+		return nil
+	case "0", "false", "off", "no":
+		*dst = false
+		return nil
+	default:
+		return fmt.Errorf("invalid %s=%q (expected true/false or on/off)", envName, v)
+	}
 }
 
 func readFirstLineFile(path string) (string, error) {

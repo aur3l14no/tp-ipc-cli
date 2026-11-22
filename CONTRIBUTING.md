@@ -56,7 +56,18 @@ firmware in several subtle ways that the codebase handles directly:
   moves prefer ONVIF port `2020` (`WS-Security` `PasswordDigest`) and fall back
   to `/stok=<token>/ds` motor calls when port `2020` is filtered. PullPoint
   `PullMessages` long-polls use a dedicated HTTP client whose timeout exceeds
-  the requested wait window.
+  the requested wait window. Hardware revisions whose ONVIF pan or tilt axis is
+  reversed (e.g., `TL-IPC48AW-PLUS 2.0`) can set per-camera `invert_pan` /
+  `invert_tilt` in `config.json`, via `--invert-pan` / `--invert-tilt`, or in
+  the `tp-ipc live` PTZ panel.
+- **Live fMP4 MSE streaming (`internal/live/fmp4.go`, `internal/live/ui.html`).**
+  Some `TL-IPC` H.264 substreams emit trailing `00 00 01 00` Annex-B bytes that
+  FFmpeg's MP4 muxer turns into 0-length AVCC NAL units (`00 00 00 00`), which
+  Chromium MSE rejects (`Failed to prepare video sample for decode`). Live
+  H.264 passthrough strips type-0 NALs via `-bsf:v filter_units=remove_types=0`
+  and normalizes RTSP audio timestamps via `aresample=async=1:first_pts=0`,
+  while the web console handles `<video>` decode errors by falling back to
+  H.264 transcoding.
 - **Historical SD export (`internal/ipc/playback.go`).** The camera streams
   historical recordings over RTSP `MULTITRANS` on port `554`: JSON control
   frames (`type: "request"` / `"notification"`) and interleaved RTP video/audio

@@ -207,13 +207,13 @@ func (s *Server) clientFor(name string) (*ipc.Client, string, error) {
 	if target == "" {
 		target = s.defaultCamera
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	cfg, ok := s.cameras[target]
 	if !ok {
 		return nil, "", fmt.Errorf("camera %q not found", target)
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if c, exists := s.clients[target]; exists {
 		return c, target, nil
 	}
@@ -386,6 +386,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	s.mu.Lock()
 	names := sortedCameraNames(s.cameras)
 	list := make([]CameraEntry, 0, len(names))
 	for _, n := range names {
@@ -396,6 +397,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			Default: n == s.defaultCamera,
 		})
 	}
+	s.mu.Unlock()
 	defQuality := "sub"
 	if s.opts.HighQuality {
 		defQuality = "main"
@@ -462,6 +464,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		presets = []ipc.Preset{}
 	}
 
+	invertPan, invertTilt := client.PTZInvert()
+
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"camera":  camName,
 		"host":    client.Settings().Host,
@@ -469,6 +473,10 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"info":    info,
 		"status":  status,
 		"ptz":     ptz,
+		"ptz_config": map[string]bool{
+			"invert_pan":  invertPan,
+			"invert_tilt": invertTilt,
+		},
 		"presets": presets,
 	})
 }
@@ -686,14 +694,16 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Camera  string `json:"camera"`
-		Target  string `json:"target"`
-		Enabled *bool  `json:"enabled,omitempty"`
-		Mode    string `json:"mode,omitempty"`
-		Kind    string `json:"kind,omitempty"`
-		Volume  *int   `json:"volume,omitempty"`
-		Action  string `json:"action,omitempty"`
-		Seconds int    `json:"seconds,omitempty"`
+		Camera     string `json:"camera"`
+		Target     string `json:"target"`
+		Enabled    *bool  `json:"enabled,omitempty"`
+		Mode       string `json:"mode,omitempty"`
+		Kind       string `json:"kind,omitempty"`
+		Volume     *int   `json:"volume,omitempty"`
+		Action     string `json:"action,omitempty"`
+		Seconds    int    `json:"seconds,omitempty"`
+		InvertPan  *bool  `json:"invert_pan,omitempty"`
+		InvertTilt *bool  `json:"invert_tilt,omitempty"`
 	}
 	if err := decodeJSONBody(r, &req); err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
@@ -765,6 +775,37 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 			}
 			err = client.TriggerAlarm(ctx, sec)
 		}
+	case "ptz_invert":
+		if req.InvertPan == nil && req.InvertTilt == nil {
+			writeAPIError(w, http.StatusBadRequest, "missing 'invert_pan' or 'invert_tilt' field")
+			return
+		}
+		curPan, curTilt := client.PTZInvert()
+		nextPan, nextTilt := curPan, curTilt
+		if req.InvertPan != nil {
+			nextPan = *req.InvertPan
+		}
+		if req.InvertTilt != nil {
+			nextTilt = *req.InvertTilt
+		}
+		client.SetPTZInvert(nextPan, nextTilt)
+		s.mu.Lock()
+		if camCfg, exists := s.cameras[camName]; exists {
+			camCfg.InvertPan = nextPan
+			camCfg.InvertTilt = nextTilt
+			s.cameras[camName] = camCfg
+		}
+		s.mu.Unlock()
+		persisted, _ := config.UpdateCameraPTZInvert(camName, nextPan, nextTilt)
+		writeAPIJSON(w, http.StatusOK, map[string]any{
+			"ok": true,
+			"ptz_config": map[string]bool{
+				"invert_pan":  nextPan,
+				"invert_tilt": nextTilt,
+			},
+			"persisted": persisted,
+		})
+		return
 	default:
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("unknown control target %q", req.Target))
 		return

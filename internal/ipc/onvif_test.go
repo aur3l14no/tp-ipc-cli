@@ -1,9 +1,16 @@
 package ipc
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aur3l14no/tp-ipc-cli/internal/config"
 )
 
 func TestParseONVIFPTZPosition(t *testing.T) {
@@ -81,5 +88,98 @@ func TestWSSEEnvelopeAndRTSPDigest(t *testing.T) {
 	}
 	if !strings.HasPrefix(hdr, `Digest username="admin", realm="TP-Link IP-Camera", nonce="abcdef123456"`) {
 		t.Fatalf("unexpected Digest header: %s", hdr)
+	}
+}
+
+func TestPTZMoveRelativeRespectsInvertFlags(t *testing.T) {
+	var soapBodies []string
+	onvifSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		soapBodies = append(soapBodies, string(b))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><tptz:RelativeMoveResponse/></s:Body></s:Envelope>`))
+	}))
+	defer onvifSrv.Close()
+
+	_, host, onvifPort, err := config.ParseHostInput(onvifSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := NewClient(config.Settings{
+		Host:       host,
+		ONVIFPort:  onvifPort,
+		User:       "admin",
+		Password:   "pw",
+		InvertPan:  true,
+		InvertTilt: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.PTZMoveRelative(context.Background(), -0.05, 0.04); err != nil {
+		t.Fatalf("PTZMoveRelative failed: %v", err)
+	}
+	if err := c.PTZMoveAbsolute(context.Background(), -0.35, 0.50); err != nil {
+		t.Fatalf("PTZMoveAbsolute failed: %v", err)
+	}
+	if len(soapBodies) != 2 {
+		t.Fatalf("expected 2 SOAP calls, got %d", len(soapBodies))
+	}
+	if !strings.Contains(soapBodies[0], `x="0.050000" y="0.040000"`) {
+		t.Fatalf("expected inverted pan (+0.05) and unchanged tilt (+0.04) in RelativeMove, got: %s", soapBodies[0])
+	}
+	if !strings.Contains(soapBodies[1], `x="-0.350000" y="0.500000"`) {
+		t.Fatalf("expected AbsoluteMove coordinates unchanged, got: %s", soapBodies[1])
+	}
+
+	// Verify /ds fallback also honors live SetPTZInvert updates
+	var dsPan, dsTilt string
+	dsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/pc/Content.htm" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error_code": -40401,
+				"data":       map[string]any{"code": -40407, "nonce": "n1", "md5_encrypt_type": 1},
+			})
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["method"] == "do" {
+			if _, ok := body["login"]; ok {
+				_ = json.NewEncoder(w).Encode(map[string]any{"error_code": 0, "stok": "tok1"})
+				return
+			}
+			if ptz, ok := body["ptz"].(map[string]any); ok {
+				if rel, ok := ptz["relative_move"].(map[string]any); ok {
+					dsPan, _ = rel["translation_pan"].(string)
+					dsTilt, _ = rel["translation_tilt"].(string)
+				}
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"error_code": 0})
+	}))
+	defer dsSrv.Close()
+
+	_, dsHost, dsPort, _ := config.ParseHostInput(dsSrv.URL)
+	c2, err := NewClient(config.Settings{
+		Host:      dsHost,
+		HTTPPort:  dsPort,
+		ONVIFPort: 1, // unreachable so it falls back to /ds
+		User:      "admin",
+		Password:  "pw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2.SetPTZInvert(true, true)
+	if err := c2.PTZMoveRelative(context.Background(), -0.05, 0.04); err != nil {
+		t.Fatalf("PTZMoveRelative /ds fallback failed: %v", err)
+	}
+	if dsPan != "0.050000" || dsTilt != "-0.040000" {
+		t.Fatalf("expected /ds fallback pan=0.050000 tilt=-0.040000, got pan=%q tilt=%q", dsPan, dsTilt)
 	}
 }

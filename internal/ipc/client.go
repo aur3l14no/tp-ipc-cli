@@ -176,7 +176,24 @@ func NewClient(cfg config.Settings) (*Client, error) {
 }
 
 func (c *Client) Settings() config.Settings {
-	return c.cfg
+	c.stateMu.RLock()
+	cfg := c.cfg
+	c.stateMu.RUnlock()
+	return cfg
+}
+
+func (c *Client) PTZInvert() (pan, tilt bool) {
+	c.stateMu.RLock()
+	pan, tilt = c.cfg.InvertPan, c.cfg.InvertTilt
+	c.stateMu.RUnlock()
+	return pan, tilt
+}
+
+func (c *Client) SetPTZInvert(invertPan, invertTilt bool) {
+	c.stateMu.Lock()
+	c.cfg.InvertPan = invertPan
+	c.cfg.InvertTilt = invertTilt
+	c.stateMu.Unlock()
 }
 
 func (c *Client) currentStok() string {

@@ -148,6 +148,26 @@ func extractGlobalFlags(args []string, stdin io.Reader) (globalOptions, []string
 				return opts, nil, err
 			}
 			opts.ov.Proxy = config.EnsureSSHProxyPrefix(v)
+		case "--invert-pan":
+			val := true
+			if hasInline {
+				b, err := parseBoolToken(inlineVal)
+				if err != nil {
+					return opts, nil, fmt.Errorf("invalid --invert-pan=%q", inlineVal)
+				}
+				val = b
+			}
+			opts.ov.InvertPan = &val
+		case "--invert-tilt":
+			val := true
+			if hasInline {
+				b, err := parseBoolToken(inlineVal)
+				if err != nil {
+					return opts, nil, fmt.Errorf("invalid --invert-tilt=%q", inlineVal)
+				}
+				val = b
+			}
+			opts.ov.InvertTilt = &val
 		default:
 			rest = append(rest, arg)
 		}
@@ -553,7 +573,17 @@ func cmdCamera(ctx context.Context, g globalOptions, subArgs []string, stdin io.
 			}
 			extra := ""
 			if c.Proxy != "" {
-				extra = " via " + c.Proxy
+				extra += " via " + c.Proxy
+			}
+			if c.InvertPan || c.InvertTilt {
+				var axes []string
+				if c.InvertPan {
+					axes = append(axes, "pan")
+				}
+				if c.InvertTilt {
+					axes = append(axes, "tilt")
+				}
+				extra += " invert:" + strings.Join(axes, ",")
 			}
 			fmt.Fprintf(stdout, "%s %-14s  %s@%s  (http:%d rtsp:%d onvif:%d%s)\n",
 				marker, c.Name, c.User, c.Host, c.HTTPPort, c.RTSPPort, c.ONVIFPort, extra)
@@ -1386,11 +1416,13 @@ Global Flags:
       --http-port <port>           Override HTTP control port (default: 80)
       --rtsp-port <port>           Override RTSP/MULTITRANS port (default: 554)
       --onvif-port <port>          Override ONVIF port (default: 2020)
+      --invert-pan[=bool]          Invert relative left/right PTZ pan direction
+      --invert-tilt[=bool]         Invert relative up/down PTZ tilt direction
       --json                       Emit machine-readable JSON output
 
 Environment Variables:
-  Single camera:  IPC_CAMERA, IPC_HOST, IPC_USER, IPC_PASSWORD, IPC_PASSWORD_FILE, IPC_PROXY, IPC_SSH
-  Multi-camera:   IPC_CAMERAS (JSON map) and/or IPC_HOST_<NAME>, IPC_USER_<NAME>, IPC_PASSWORD_<NAME>, IPC_PROXY_<NAME>
+  Single camera:  IPC_CAMERA, IPC_HOST, IPC_USER, IPC_PASSWORD, IPC_PASSWORD_FILE, IPC_PROXY, IPC_SSH, IPC_INVERT_PAN, IPC_INVERT_TILT
+  Multi-camera:   IPC_CAMERAS (JSON map) and/or IPC_HOST_<NAME>, IPC_USER_<NAME>, IPC_PASSWORD_<NAME>, IPC_PROXY_<NAME>, IPC_INVERT_PAN_<NAME>, IPC_INVERT_TILT_<NAME>
   Media dir:      IPC_MEDIA_DIR
 `)
 }

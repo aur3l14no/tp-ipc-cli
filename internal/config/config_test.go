@@ -216,3 +216,62 @@ func TestProxyParsingSecurityAndOverrides(t *testing.T) {
 		t.Fatal("expected invalid proxy in IPC_CAMERAS to fail LoadStore")
 	}
 }
+
+func TestPTZInvertPersistenceEnvAndOverrides(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	if _, err := Save(Settings{
+		Name:      "desk",
+		Host:      "192.168.1.60",
+		User:      "admin",
+		Password:  "pw1",
+		InvertPan: true,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(Overrides{Camera: "desk"})
+	if err != nil || !loaded.InvertPan || loaded.InvertTilt {
+		t.Fatalf("expected InvertPan=true, InvertTilt=false; got %+v err=%v", loaded, err)
+	}
+
+	// Explicit --invert-pan=false override clears saved InvertPan without touching disk
+	f := false
+	tr := true
+	overridden, err := Load(Overrides{Camera: "desk", InvertPan: &f, InvertTilt: &tr})
+	if err != nil || overridden.InvertPan || !overridden.InvertTilt {
+		t.Fatalf("expected override pan=false tilt=true; got %+v err=%v", overridden, err)
+	}
+
+	// Env var IPC_INVERT_PAN_LAB applies to env-only profile
+	t.Setenv("IPC_HOST_LAB", "192.168.1.61")
+	t.Setenv("IPC_INVERT_PAN_LAB", "true")
+	lab, err := Load(Overrides{Camera: "lab"})
+	if err != nil || !lab.InvertPan {
+		t.Fatalf("expected env-defined lab InvertPan=true; got %+v err=%v", lab, err)
+	}
+
+	// UpdateCameraPTZInvert updates on-disk profile without writing env-only cameras to config.json
+	persisted, err := UpdateCameraPTZInvert("desk", false, true)
+	if err != nil || !persisted {
+		t.Fatalf("UpdateCameraPTZInvert(desk) failed: persisted=%v err=%v", persisted, err)
+	}
+	envPersisted, err := UpdateCameraPTZInvert("lab", true, false)
+	if err != nil || envPersisted {
+		t.Fatalf("expected env-only lab not persisted: persisted=%v err=%v", envPersisted, err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(tmp, "tp-ipc", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"lab"`) {
+		t.Fatalf("UpdateCameraPTZInvert leaked env-only camera into config.json: %s", string(raw))
+	}
+
+	reloaded, err := Load(Overrides{Camera: "desk"})
+	if err != nil || reloaded.InvertPan || !reloaded.InvertTilt {
+		t.Fatalf("expected reloaded desk pan=false tilt=true; got %+v err=%v", reloaded, err)
+	}
+}
