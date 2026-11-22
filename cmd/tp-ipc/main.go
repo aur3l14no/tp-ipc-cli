@@ -20,7 +20,7 @@ import (
 	"github.com/aur3l14no/tp-ipc-cli/internal/live"
 )
 
-var version = "0.3.3"
+var version = "0.4.0"
 
 type globalOptions struct {
 	jsonOut bool
